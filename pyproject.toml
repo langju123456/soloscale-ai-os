@@ -1,0 +1,138 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soloscale-ai-os"
+version = "0.4.1"
+description = "Human-controlled AI workflow, evidence, and private retrieval system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8,<3",
+  "typer>=0.12,<1",
+  "rich>=13.7,<16",
+  "google-genai>=1.0,<2",
+  "google-api-python-client>=2.190,<3",
+  "google-auth>=2.40,<3",
+  "google-auth-httplib2>=0.2,<1",
+  "google-auth-oauthlib>=1.2,<2",
+  "Pillow>=12,<13",
+  "pypdf>=6.10,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "pytest>=8,<10",
+  "ruff>=0.6,<1",
+  "mypy>=1.11,<2",
+]
+desktop = [
+  "pyinstaller>=6.21,<7",
+]
+
+[project.scripts]
+soloscale = "soloscale.cli:app"
+soloscale-ui = "soloscale.local_ui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+soloscale = ["content_data/*.json"]
+
+[tool.setuptools.data-files]
+"share/soloscale-ai-os/.agents" = [".agents/README.md"]
+"share/soloscale-ai-os/.agents/task-templates" = [
+  ".agents/task-templates/high-level-request.md",
+  ".agents/task-templates/run-receipt.schema.json",
+  ".agents/task-templates/task-envelope.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills" = [".agents/skills/registry.yaml"]
+"share/soloscale-ai-os/.agents/skills/editorial-package" = [
+  ".agents/skills/editorial-package/CHANGELOG.md",
+  ".agents/skills/editorial-package/SKILL.md",
+  ".agents/skills/editorial-package/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/editorial-package/agents" = [".agents/skills/editorial-package/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/editorial-package/examples" = [".agents/skills/editorial-package/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/evidence-refresh-and-bundle" = [
+  ".agents/skills/evidence-refresh-and-bundle/CHANGELOG.md",
+  ".agents/skills/evidence-refresh-and-bundle/SKILL.md",
+  ".agents/skills/evidence-refresh-and-bundle/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/evidence-refresh-and-bundle/agents" = [".agents/skills/evidence-refresh-and-bundle/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/evidence-refresh-and-bundle/examples" = [".agents/skills/evidence-refresh-and-bundle/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/learning-gap-to-packet" = [
+  ".agents/skills/learning-gap-to-packet/CHANGELOG.md",
+  ".agents/skills/learning-gap-to-packet/SKILL.md",
+  ".agents/skills/learning-gap-to-packet/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/learning-gap-to-packet/agents" = [".agents/skills/learning-gap-to-packet/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/learning-gap-to-packet/examples" = [".agents/skills/learning-gap-to-packet/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/linkedin-publishing" = [
+  ".agents/skills/linkedin-publishing/CHANGELOG.md",
+  ".agents/skills/linkedin-publishing/SKILL.md",
+  ".agents/skills/linkedin-publishing/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/linkedin-publishing/agents" = [".agents/skills/linkedin-publishing/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/linkedin-publishing/examples" = [".agents/skills/linkedin-publishing/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/resume-tailoring" = [
+  ".agents/skills/resume-tailoring/CHANGELOG.md",
+  ".agents/skills/resume-tailoring/SKILL.md",
+  ".agents/skills/resume-tailoring/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/resume-tailoring/agents" = [".agents/skills/resume-tailoring/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/resume-tailoring/examples" = [".agents/skills/resume-tailoring/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/skill-distillation" = [
+  ".agents/skills/skill-distillation/CHANGELOG.md",
+  ".agents/skills/skill-distillation/SKILL.md",
+  ".agents/skills/skill-distillation/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/skill-distillation/agents" = [".agents/skills/skill-distillation/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/skill-distillation/examples" = [".agents/skills/skill-distillation/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/task-intake-and-routing" = [
+  ".agents/skills/task-intake-and-routing/CHANGELOG.md",
+  ".agents/skills/task-intake-and-routing/SKILL.md",
+  ".agents/skills/task-intake-and-routing/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/task-intake-and-routing/agents" = [".agents/skills/task-intake-and-routing/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/task-intake-and-routing/examples" = [".agents/skills/task-intake-and-routing/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/visual-storytelling" = [
+  ".agents/skills/visual-storytelling/CHANGELOG.md",
+  ".agents/skills/visual-storytelling/SKILL.md",
+  ".agents/skills/visual-storytelling/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/visual-storytelling/agents" = [".agents/skills/visual-storytelling/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/visual-storytelling/examples" = [".agents/skills/visual-storytelling/examples/example.md"]
+"share/soloscale-ai-os/.agents/skills/x-thread-publishing" = [
+  ".agents/skills/x-thread-publishing/CHANGELOG.md",
+  ".agents/skills/x-thread-publishing/SKILL.md",
+  ".agents/skills/x-thread-publishing/contract.schema.json",
+]
+"share/soloscale-ai-os/.agents/skills/x-thread-publishing/agents" = [".agents/skills/x-thread-publishing/agents/openai.yaml"]
+"share/soloscale-ai-os/.agents/skills/x-thread-publishing/examples" = [".agents/skills/x-thread-publishing/examples/example.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "ISC", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["soloscale"]
+
+[[tool.mypy.overrides]]
+module = ["buildlog", "buildlog.*"]
+ignore_missing_imports = true

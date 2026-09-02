@@ -1,0 +1,6 @@
+interface:
+  display_name: "Learning Gap to Packet"
+  short_description: "Turn evidence gaps into traceable learning practice"
+  default_prompt: "Use $learning-gap-to-packet to turn these grounded gaps into a mastery-safe Learning Tower packet."
+policy:
+  allow_implicit_invocation: true

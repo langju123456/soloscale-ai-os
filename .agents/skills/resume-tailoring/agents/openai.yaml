@@ -1,0 +1,6 @@
+interface:
+  display_name: "Resume Tailoring"
+  short_description: "Tailor resumes without inventing candidate claims"
+  default_prompt: "Use $resume-tailoring to tailor this approved Candidate Profile to the JD and surface unsupported requirements."
+policy:
+  allow_implicit_invocation: true

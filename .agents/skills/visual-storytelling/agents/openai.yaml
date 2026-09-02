@@ -1,0 +1,6 @@
+interface:
+  display_name: "Visual Storytelling"
+  short_description: "Plan and render a matched public-safe visual"
+  default_prompt: "Use $visual-storytelling to choose and produce the most useful public-safe visual for this reviewed story."
+policy:
+  allow_implicit_invocation: true

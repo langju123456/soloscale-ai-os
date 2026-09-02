@@ -1,0 +1,37 @@
+{
+  "name": "SoloScale Execution Manual",
+  "version": "1.0",
+  "date": "2026-08-06",
+  "language": "zh-CN",
+  "tracks": [
+    "SoloScale Core",
+    "Creator Revenue & Video Factory"
+  ],
+  "files": [
+    "README.md",
+    "action-register.csv",
+    "docs/00_QUICK_START.md",
+    "docs/01_MASTER_SYSTEM_MAP.md",
+    "docs/02_DIVISION_OF_LABOR.md",
+    "docs/03_SOLOSCALE_CORE_ROADMAP.md",
+    "docs/04_CREATOR_REVENUE_VIDEO_ROADMAP.md",
+    "docs/05_ACTION_ROUTER_AND_REGISTER.md",
+    "docs/06_GITHUB_EVIDENCE_SYSTEM.md",
+    "docs/07_METRICS_BUDGET_AND_GATES.md",
+    "docs/08_30_DAY_EXECUTION_PLAN.md",
+    "docs/09_DAILY_WEEKLY_RUNBOOK.md",
+    "docs/10_PUBLIC_CONTENT_SERIES.md",
+    "docs/11_SOURCES_AND_TOOL_NOTES.md",
+    "docs/12_PROMPT_INDEX.md",
+    "prompts/CHATGPT_ACTION_PROMPTS.md",
+    "prompts/CODEX_ACTION_PROMPTS.md",
+    "prompts/PLUGIN_ACTION_PROMPTS.md",
+    "templates/CODEX_EXECUTION_PACKET.md",
+    "templates/INDEPENDENT_REVIEW_PACKET.md",
+    "templates/RUN_EVIDENCE_SUMMARY.md",
+    "templates/TASK_ENVELOPE.md",
+    "templates/VIDEO_CONTENT_BRIEF.md",
+    "templates/WEEKLY_REVIEW.md",
+    "manifest.json"
+  ]
+}

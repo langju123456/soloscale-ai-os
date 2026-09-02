@@ -1,0 +1,6 @@
+interface:
+  display_name: "Evidence Refresh and Bundle"
+  short_description: "Refresh local metadata and build EvidenceBundles"
+  default_prompt: "Use $evidence-refresh-and-bundle to refresh approved local sources and build one bounded EvidenceBundle."
+policy:
+  allow_implicit_invocation: true

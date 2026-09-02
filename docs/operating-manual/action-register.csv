@@ -1,0 +1,33 @@
+﻿ID,Action,Owner,Prompt ID,Priority,Gate,Output
+A001,每周收敛优先级,CHAT,CHAT-WEEKLY-001,NOW,无,本周3个Outcomes
+A002,任务分诊,CHAT,CHAT-ROUTE-001,NOW,无,Task Envelope + Route
+A003,市场/用户研究,CHAT,CHAT-RESEARCH-001,NOW,无,Research + validation experiment
+A004,产品与架构计划,CHAT,CHAT-PLAN-001,NOW,Human plan approval,Approved Plan draft
+A005,Codex执行包,CHAT,CHAT-PACKET-001,NOW,Human plan approval,Bounded Execution Packet
+A006,创建GitHub Issue,PLUGIN,PLUGIN-GH-001,NOW,Write confirmation,Issue URL
+A007,创建Figma架构图,PLUGIN,PLUGIN-FIGMA-001,NOW,Write confirmation,Editable board
+A008,只读Repo检查,CODEX,CODEX-REPO-001,NOW,Read-only,Compatibility Report
+A009,本地实现,CODEX,CODEX-IMPLEMENT-001,NOW,Stop Conditions,Minimal diff
+A010,本地验证,VERIFY,CODEX-VERIFY-001,NOW,无,Verification report
+A011,本地Branch/Commit,CODEX,CODEX-GIT-001,NOW,Human approval,Local commit
+A012,创建PR,PLUGIN,PLUGIN-GH-002,NOW,Human approval,PR URL
+A013,Fresh独立审查,REVIEW,CHAT-REVIEW-001,NOW,New chat,P0/P1/P2 verdict
+A014,修P0/P1,CODEX,CODEX-FIX-001,NOW,Max 2 rounds,Minimal fixes
+A015,Evidence Pack,CODEX,CODEX-EVIDENCE-001,NOW,无,Run artifacts
+A016,BuildLog Narrative,CHAT,CHAT-NARRATIVE-001,NOW,Human fact check,Canonical narrative
+A017,Creator Benchmark,CHAT,CHAT-CREATOR-001,NEXT,Compliant samples,Skill cards
+A018,短视频脚本批次,CHAT,CHAT-SHORTS-001,NOW,Claim check,10 scripts
+A019,长视频脚本,CHAT,CHAT-LONGVIDEO-001,NOW,Claim check,Script + storyboard
+A020,Carousel视觉,PLUGIN,PLUGIN-FIGMA-002,NOW,Human brand check,Editable carousel
+A021,Remotion模板,CODEX,CODEX-VIDEO-001,NOW,Local only,3 compositions
+A022,视频批量渲染,CODEX,CODEX-RENDER-001,NOW,Evidence validation,MP4/SRT/Pack
+A023,Avatar片段,PLUGIN,PLUGIN-AVATAR-001,NEXT,Human identity approval,A-roll clips
+A024,长转短,PLUGIN,PLUGIN-CLIP-001,NEXT,Human selection,Short candidates
+A025,Landing Page Copy,CHAT,CHAT-OFFER-001,NOW,Human business approval,Approved copy
+A026,Landing Page Code,CODEX,CODEX-LANDING-001,NOW,No production secret,Local site
+A027,Preview部署,PLUGIN,PLUGIN-VERCEL-001,NOW,Deploy approval,Preview URL
+A028,Stripe产品设置,HUMAN,HUMAN-CHECKLIST,NEXT,Financial approval,Payment link
+A029,内容发布,PLUGIN+HUMAN,PLUGIN-PUBLISH-001,NEXT,Explicit PUBLISH,Publication URL
+A030,Analytics复盘,CHAT,CHAT-ANALYTICS-001,NEXT,无,Experiments
+A031,API Runtime,RUNTIME+CODEX,FUTURE-SPEC,LATER,Architecture gate,Service
+A032,Public Release,HUMAN+PLUGIN,RELEASE-CHECKLIST,LATER,Public readiness PASS,Public release

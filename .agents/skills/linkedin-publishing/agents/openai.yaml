@@ -1,0 +1,6 @@
+interface:
+  display_name: "LinkedIn Publishing"
+  short_description: "Preview LinkedIn and enforce the PUBLISH gate"
+  default_prompt: "Use $linkedin-publishing to show the exact approved LinkedIn artifact and stop at the explicit PUBLISH gate."
+policy:
+  allow_implicit_invocation: true

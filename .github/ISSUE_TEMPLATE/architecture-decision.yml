@@ -1,0 +1,29 @@
+name: Architecture Decision
+description: Propose and record a consequential design choice.
+title: "[ADR]: "
+labels: ["architecture", "decision"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options considered
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed decision
+    validations:
+      required: true
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences and trade-offs
+    validations:
+      required: true

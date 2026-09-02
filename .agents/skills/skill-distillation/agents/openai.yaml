@@ -1,0 +1,6 @@
+interface:
+  display_name: "Skill Distillation"
+  short_description: "Propose auditable Skill candidates and updates"
+  default_prompt: "Use $skill-distillation to evaluate this approved Run for a candidate Skill or versioned improvement."
+policy:
+  allow_implicit_invocation: true

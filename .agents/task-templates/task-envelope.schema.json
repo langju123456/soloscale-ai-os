@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://soloscale.local/schemas/skill-task-envelope-1.0.json",
+  "title": "SoloScale Skill Task Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "request_sha256", "objective", "desired_user_or_external_outcome", "requested_artifacts", "project_or_workstream", "available_inputs", "evidence_requirements", "constraints", "publication_intent", "deployment_intent", "application_submission_intent", "paid_api_intent", "cost_boundary", "privacy_boundary", "completion_condition", "known_non_goals"],
+  "properties": {
+    "task_id": {"type": "string", "pattern": "^skill-task-[0-9a-f]{12}$"},
+    "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "desired_user_or_external_outcome": {"type": "string", "minLength": 1, "maxLength": 1200},
+    "requested_artifacts": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 30},
+    "project_or_workstream": {"type": "string", "minLength": 1, "maxLength": 120},
+    "available_inputs": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 30},
+    "evidence_requirements": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 30},
+    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 40},
+    "publication_intent": {"type": "boolean"},
+    "deployment_intent": {"type": "boolean"},
+    "application_submission_intent": {"type": "boolean"},
+    "paid_api_intent": {"type": "boolean"},
+    "cost_boundary": {"type": ["string", "null"], "maxLength": 300},
+    "privacy_boundary": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 20},
+    "completion_condition": {"type": "string", "minLength": 1, "maxLength": 1200},
+    "known_non_goals": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 40}
+  },
+  "allOf": [
+    {"if": {"properties": {"publication_intent": {"const": true}}, "required": ["publication_intent"]}, "then": {"properties": {"constraints": {"contains": {"type": "string", "pattern": "(?i)publish"}}}}},
+    {"if": {"properties": {"paid_api_intent": {"const": true}}, "required": ["paid_api_intent"]}, "then": {"properties": {"cost_boundary": {"type": "string", "minLength": 1}}}}
+  ]
+}

@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "name": "SoloScale synthetic bilingual Conversation RAG evaluation",
+  "provenance": "Entirely synthetic public test data; no private conversation content.",
+  "limitations": {
+    "semantic_faithfulness_evaluated": false,
+    "citation_membership_is_structural_only": true,
+    "note": "This gate evaluates deterministic retrieval and store neighbor expansion. It does not exercise the Evidence Agent context-byte allocator or prove that cited text semantically supports a generated claim."
+  },
+  "document_families": [
+    {
+      "count": 32,
+      "id_template": "doc-en-distractor-{index:03d}",
+      "external_id_template": "en-distractor-{index:03d}",
+      "locator_template": "synthetic://english/distractor/{index:03d}",
+      "source_kind": "codex_session",
+      "title": "English distractor",
+      "aliases": "",
+      "chunks": [
+        {
+          "id_template": "en-distractor-{index:03d}-c0",
+          "role": "user",
+          "text_template": "alpha-only distraction record {index:03d}"
+        }
+      ]
+    },
+    {
+      "count": 24,
+      "id_template": "doc-duplicate-{index:03d}",
+      "external_id_template": "duplicate-{index:03d}",
+      "locator_template": "synthetic://duplicates/{index:03d}",
+      "source_kind": "codex_session",
+      "title": null,
+      "aliases": "",
+      "chunks": [
+        {
+          "id_template": "duplicate-{index:03d}-c0",
+          "role": "user",
+          "text_template": "echo duplicate evidence"
+        }
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "id": "doc-en-relevant",
+      "external_id": "en-relevant",
+      "locator": "synthetic://english/relevant",
+      "source_kind": "codex_session",
+      "title": "English multi-term evidence",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "en-relevant-c0",
+          "role": "assistant",
+          "text": "alpha beta root cause was confirmed by a deterministic replay"
+        }
+      ]
+    },
+    {
+      "id": "doc-zh-evidence-only",
+      "external_id": "zh-evidence-only",
+      "locator": "synthetic://chinese/evidence-only",
+      "source_kind": "chatgpt_export",
+      "title": "中文干扰项一",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "zh-evidence-only-c0",
+          "role": "assistant",
+          "text": "工程证据需要持续保存。"
+        }
+      ]
+    },
+    {
+      "id": "doc-zh-source-only",
+      "external_id": "zh-source-only",
+      "locator": "synthetic://chinese/source-only",
+      "source_kind": "chatgpt_export",
+      "title": "中文干扰项二",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "zh-source-only-c0",
+          "role": "assistant",
+          "text": "来源定位应该保持稳定。"
+        }
+      ]
+    },
+    {
+      "id": "doc-zh-relevant",
+      "external_id": "zh-relevant",
+      "locator": "synthetic://chinese/relevant",
+      "source_kind": "chatgpt_export",
+      "title": "中文复合检索",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "zh-relevant-c0",
+          "role": "assistant",
+          "text": "工程证据应该同时保留哈希和来源定位。"
+        }
+      ]
+    },
+    {
+      "id": "doc-title-thread",
+      "external_id": "title-thread",
+      "locator": "synthetic://metadata/title-thread",
+      "source_kind": "codex_session",
+      "title": "Atlas Ledger",
+      "aliases": "",
+      "chunks": [
+        {
+          "repeat": 20,
+          "id_template": "title-thread-c{ordinal:02d}",
+          "role": "user",
+          "text_template": "ordinary title-only turn {ordinal:02d}"
+        }
+      ]
+    },
+    {
+      "id": "doc-title-body",
+      "external_id": "title-body",
+      "locator": "synthetic://metadata/body-evidence",
+      "source_kind": "codex_session",
+      "title": "Body evidence",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "title-body-c0",
+          "role": "assistant",
+          "text": "Atlas Ledger contains the decisive recovery record in this body."
+        }
+      ]
+    },
+    {
+      "id": "doc-duplicate-unique",
+      "external_id": "duplicate-unique",
+      "locator": "synthetic://duplicates/unique",
+      "source_kind": "codex_session",
+      "title": null,
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "duplicate-unique-c0",
+          "role": "assistant",
+          "text": "echo recovery trail is unique evidence"
+        }
+      ]
+    },
+    {
+      "id": "doc-adjacent-turns",
+      "external_id": "adjacent-turns",
+      "locator": "synthetic://context/adjacent-turns",
+      "source_kind": "codex_session",
+      "title": "Adjacent question and answer",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "adjacent-question",
+          "role": "user",
+          "text": "How did we recover from the frobnicator outage?"
+        },
+        {
+          "id": "adjacent-answer",
+          "role": "assistant",
+          "text": "We added a durable queue and an idempotency key."
+        }
+      ]
+    },
+    {
+      "id": "doc-long-message",
+      "external_id": "long-message",
+      "locator": "synthetic://context/long-message",
+      "source_kind": "codex_session",
+      "title": "Segmented long message",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "long-message-first",
+          "role": "assistant",
+          "text": "partition journal diagnosis begins here",
+          "metadata": {
+            "message_id": "long-message-one",
+            "segment": "0"
+          }
+        },
+        {
+          "repeat": 7,
+          "id_template": "long-message-middle-{ordinal:02d}",
+          "role": "assistant",
+          "text_template": "bounded filler segment {ordinal:02d}",
+          "metadata": {
+            "message_id": "long-message-one"
+          }
+        },
+        {
+          "id": "long-message-tail",
+          "role": "assistant",
+          "text": "tail resolution used a write-ahead checksum",
+          "metadata": {
+            "message_id": "long-message-one",
+            "segment": "8"
+          }
+        }
+      ]
+    },
+    {
+      "id": "doc-branched-chat",
+      "external_id": "branched-chat",
+      "locator": "synthetic://context/branched-chat",
+      "source_kind": "chatgpt_export",
+      "title": "Branched ChatGPT graph",
+      "aliases": "",
+      "chunks": [
+        {
+          "id": "branch-question",
+          "role": "user",
+          "text": "Which release branch should we use?",
+          "metadata": {
+            "node_id": "node-user",
+            "parent_node_id": "node-root",
+            "message_id": "message-user",
+            "segment": "0"
+          }
+        },
+        {
+          "id": "branch-sibling-answer",
+          "role": "assistant",
+          "text": "Use the obsolete sibling branch.",
+          "metadata": {
+            "node_id": "node-sibling",
+            "parent_node_id": "node-user",
+            "message_id": "message-sibling",
+            "segment": "0"
+          }
+        },
+        {
+          "id": "branch-sibling-followup",
+          "role": "user",
+          "text": "This sibling path is forbidden context.",
+          "metadata": {
+            "node_id": "node-sibling-followup",
+            "parent_node_id": "node-sibling",
+            "message_id": "message-sibling-followup",
+            "segment": "0"
+          }
+        },
+        {
+          "id": "branch-current-answer",
+          "role": "assistant",
+          "text": "The current branch decision is release-safe.",
+          "metadata": {
+            "node_id": "node-current",
+            "parent_node_id": "node-user",
+            "message_id": "message-current",
+            "segment": "0"
+          }
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "english_multi_term",
+      "query": "alpha beta",
+      "relevant_chunk_ids": ["en-relevant-c0"]
+    },
+    {
+      "id": "unspaced_chinese_compound",
+      "query": "证据来源",
+      "relevant_chunk_ids": ["zh-relevant-c0"]
+    },
+    {
+      "id": "metadata_title_without_fanout",
+      "query": "Atlas Ledger",
+      "relevant_chunk_ids": ["title-thread-c00", "title-body-c0"]
+    },
+    {
+      "id": "duplicate_text_saturation",
+      "query": "echo recovery trail",
+      "relevant_chunk_ids": ["duplicate-unique-c0"]
+    },
+    {
+      "id": "adjacent_question",
+      "query": "frobnicator outage",
+      "relevant_chunk_ids": ["adjacent-question"]
+    },
+    {
+      "id": "long_message_first_segment",
+      "query": "partition journal diagnosis",
+      "relevant_chunk_ids": ["long-message-first"]
+    },
+    {
+      "id": "branched_graph_current_path",
+      "query": "current branch decision",
+      "relevant_chunk_ids": ["branch-current-answer"]
+    },
+    {
+      "id": "low_evidence_query",
+      "query": "quasar marmalade unobtainium",
+      "relevant_chunk_ids": [],
+      "expect_empty": true
+    }
+  ],
+  "context_cases": [
+    {
+      "id": "adjacent_question_to_answer",
+      "query": "frobnicator outage",
+      "primary_chunk_id": "adjacent-question",
+      "required_context_ids": ["adjacent-answer"],
+      "forbidden_context_ids": []
+    },
+    {
+      "id": "long_message_first_to_tail",
+      "query": "partition journal diagnosis",
+      "primary_chunk_id": "long-message-first",
+      "required_context_ids": ["long-message-tail"],
+      "forbidden_context_ids": []
+    },
+    {
+      "id": "branched_graph_excludes_sibling",
+      "query": "current branch decision",
+      "primary_chunk_id": "branch-current-answer",
+      "required_context_ids": ["branch-question"],
+      "forbidden_context_ids": ["branch-sibling-answer", "branch-sibling-followup"]
+    }
+  ],
+  "guards": {
+    "title_query": "Atlas Ledger",
+    "title_document_id": "doc-title-thread",
+    "max_title_document_hits_at_5": 1,
+    "duplicate_query": "echo",
+    "duplicate_text": "echo duplicate evidence",
+    "max_duplicate_text_hits_at_5": 1,
+    "required_unique_duplicate_chunk_id": "duplicate-unique-c0"
+  },
+  "thresholds": {
+    "recall_at_5": 1.0,
+    "mrr": 1.0,
+    "context_recall": 1.0,
+    "forbidden_context_precision": 1.0,
+    "max_search_latency_ms": 5000.0
+  }
+}

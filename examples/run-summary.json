@@ -1,0 +1,50 @@
+{
+  "schema_version": "0.1",
+  "id": "soloscale-router-001",
+  "title": "Separating one AI brain from multiple execution surfaces",
+  "goal": "Test a workflow that reserves stateful coding execution for work that needs local state.",
+  "context": "ChatGPT Chat, plugins, Codex, and API runtimes can overlap, but they have different state and latency boundaries.",
+  "problem": "The previous workflow did not distinguish product reasoning and online actions from work that required a local repository.",
+  "actions": [
+    "Defined five task surfaces: Chat, Plugin, Codex, Runtime, and Human.",
+    "Created a typed Task Envelope.",
+    "Implemented a deterministic routing policy.",
+    "Added human gates for risky, public, and irreversible actions."
+  ],
+  "decisions": [
+    {
+      "schema_version": "0.1",
+      "decision": "Use one strong reasoning core before adding specialist agents.",
+      "reason": "Multiple weak agents often repeat context and require another synthesis step.",
+      "alternatives_considered": [
+        "Run six or seven agents on every task.",
+        "Use Codex as the default entry point for all technical work."
+      ]
+    }
+  ],
+  "trade_offs": [
+    "The routing policy must be maintained as new plugins and execution surfaces appear.",
+    "Some local implementation reasoning remains inside Codex."
+  ],
+  "result": "Representative tasks can be routed to the minimum required surface with explicit secondary roles and approval gates.",
+  "lessons": [
+    "Multi-agent orchestration is valuable when roles have different tools or boundaries, not merely different personalities.",
+    "Contracts and evidence are more reliable than transferring long chat histories."
+  ],
+  "evidence": [
+    "The routing test suite covers Chat, Plugin, Codex, Runtime, and Human-gate paths.",
+    "The Execution Packet generator produces a bounded local implementation contract."
+  ],
+  "audience": "AI engineers, solo founders, developer-tool builders, and technical recruiters",
+  "metadata": {
+    "project": "SoloScale AI OS",
+    "language": "Python",
+    "tools": [
+      "Pydantic",
+      "Typer",
+      "GitHub",
+      "Codex",
+      "BuildLog"
+    ]
+  }
+}

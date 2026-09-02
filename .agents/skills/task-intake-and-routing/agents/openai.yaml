@@ -1,0 +1,6 @@
+interface:
+  display_name: "Task Intake and Routing"
+  short_description: "Normalize requests and compose safe Skill routes"
+  default_prompt: "Use $task-intake-and-routing to normalize this outcome and select the smallest safe SoloScale Skill route."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,51 @@
+{
+  "schema_version": "0.1",
+  "id": "task-research-citations-001",
+  "title": "Add source-grounded citations to the Research Agent",
+  "goal": "Every externally verifiable claim in the generated report must link to inspectable source evidence.",
+  "repository": "../AI-Research-Assistant-LangJu-Edition",
+  "branch": "feat/source-grounded-citations",
+  "requested_paths": [
+    "app/",
+    "tests/"
+  ],
+  "reasoning_depth": "high",
+  "latency_tolerance": "batch",
+  "risk": "medium",
+  "requires_local_files": true,
+  "requires_terminal": true,
+  "requires_realtime": false,
+  "requires_scheduled_execution": false,
+  "plugin_can_complete": false,
+  "plugin_name": null,
+  "high_risk_action": false,
+  "irreversible_action": false,
+  "public_action": false,
+  "constraints": [
+    "Preserve the existing user-facing workflow.",
+    "Do not add a production dependency without approval."
+  ],
+  "frozen_decisions": [
+    "Missing source evidence must never be invented.",
+    "Preserve the current retrieval framework for this iteration."
+  ],
+  "required_changes": [
+    "Return structured source receipts with the generated answer.",
+    "Render available source receipts in the existing user interface."
+  ],
+  "acceptance_criteria": [
+    "Each report claim can be traced to a source identifier.",
+    "Missing sources are represented honestly rather than invented.",
+    "Unit tests cover successful and missing-citation paths."
+  ],
+  "tests_to_run": [
+    "pytest tests/test_citations.py",
+    "pytest"
+  ],
+  "non_goals": [
+    "Redesigning the entire Research Agent UI.",
+    "Adding autonomous publishing."
+  ],
+  "status": "NEW",
+  "created_at": "2026-08-06T00:00:00Z"
+}

@@ -1,0 +1,67 @@
+name: SoloScale Task
+description: Create a structured Task Envelope for a workflow or feature.
+title: "[Task]: "
+labels: ["task", "triage"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What verifiable outcome should exist?
+    validations:
+      required: true
+  - type: dropdown
+    id: primary-surface
+    attributes:
+      label: Expected primary surface
+      options:
+        - CHAT
+        - PLUGIN
+        - CODEX
+        - RUNTIME
+        - HUMAN
+        - Unknown — route it
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and evidence
+      description: Include facts, links, logs, screenshots, or repository references.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and frozen decisions
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - low
+        - medium
+        - high
+        - critical
+    validations:
+      required: true
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Human-gate triggers
+      options:
+        - label: Spending or paid action
+        - label: Production or infrastructure change
+        - label: Public publishing
+        - label: Secret, identity, or permission change
+        - label: Destructive or irreversible action

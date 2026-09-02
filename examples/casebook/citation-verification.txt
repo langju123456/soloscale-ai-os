@@ -1,0 +1,13 @@
+Sanitized verification receipt
+
+- Exact approved changed-file count: 6
+- Local full suite: 70 passed
+- Static check: passed
+- UTF-8 check: passed
+- Pull-request static and lightweight jobs: passed
+- Post-merge main static, lightweight, and Conda/FAISS integration jobs: passed
+- Fresh-context post-merge audit: P0=0, P1=0, P2=1
+- Audit verdict: ACCEPT MERGED IMPLEMENTATION
+
+Unmeasured values remained unmeasured: active work time, turns, tokens, cost,
+and business impact.

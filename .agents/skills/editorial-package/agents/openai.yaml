@@ -1,0 +1,6 @@
+interface:
+  display_name: "Editorial Package"
+  short_description: "Draft, review, and revise evidence-backed posts"
+  default_prompt: "Use $editorial-package to create fresh-reviewed LinkedIn and X drafts from this EvidenceBundle without publishing."
+policy:
+  allow_implicit_invocation: true

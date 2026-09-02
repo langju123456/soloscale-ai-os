@@ -1,0 +1,42 @@
+[
+  {
+    "query": "desktop product navigation download preview packaging",
+    "relevant_evidence_ids": ["EVIDENCE-M1-12"]
+  },
+  {
+    "query": "AI feature worked but desktop product failed",
+    "relevant_evidence_ids": ["EVIDENCE-M1-12"]
+  },
+  {
+    "query": "non-blocking background jobs resume generation",
+    "relevant_evidence_ids": ["EVIDENCE-M1-13"]
+  },
+  {
+    "query": "responsive UI during two minute model generation",
+    "relevant_evidence_ids": ["EVIDENCE-M1-13"]
+  },
+  {
+    "query": "single ThreadPoolExecutor worker polling job IDs",
+    "relevant_evidence_ids": ["EVIDENCE-M1-14"]
+  },
+  {
+    "query": "bounded concurrency and local AI backpressure",
+    "relevant_evidence_ids": ["EVIDENCE-M1-14"]
+  },
+  {
+    "query": "qwen model generation latency profiling",
+    "relevant_evidence_ids": ["EVIDENCE-M1-15"]
+  },
+  {
+    "query": "measured performance bottleneck over 99 percent",
+    "relevant_evidence_ids": ["EVIDENCE-M1-15"]
+  },
+  {
+    "query": "interview preparation content framework",
+    "relevant_evidence_ids": ["EVIDENCE-M1-22"]
+  },
+  {
+    "query": "defend project architecture decisions in a video and blog",
+    "relevant_evidence_ids": ["EVIDENCE-M1-22"]
+  }
+]

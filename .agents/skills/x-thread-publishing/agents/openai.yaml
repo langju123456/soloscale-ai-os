@@ -1,0 +1,6 @@
+interface:
+  display_name: "X Thread Publishing"
+  short_description: "Validate and gate a resumable X thread"
+  default_prompt: "Use $x-thread-publishing to validate every approved thread part and stop at the explicit PUBLISH gate."
+policy:
+  allow_implicit_invocation: true
