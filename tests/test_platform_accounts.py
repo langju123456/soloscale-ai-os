@@ -11,6 +11,7 @@ import pytest
 from soloscale.platform_accounts import (
     ConnectedIdentity,
     PlatformAccountError,
+    PlatformKey,
     complete_authorization_response,
     consume_authorization_callback,
     disconnect_identity,
@@ -30,8 +31,8 @@ from soloscale.platform_accounts import (
 from soloscale.youtube_publishing import save_authorized_channel
 
 
-def _identity(platform: str, scopes: tuple[str, ...]) -> ConnectedIdentity:
-    return ConnectedIdentity(  # type: ignore[arg-type]
+def _identity(platform: PlatformKey, scopes: tuple[str, ...]) -> ConnectedIdentity:
+    return ConnectedIdentity(
         platform=platform,
         external_account_id="12345",
         display_name="Synthetic Account",

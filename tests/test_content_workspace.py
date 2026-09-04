@@ -210,8 +210,10 @@ def test_month_one_bilingual_variants_share_facts_but_persist_separately(
         run_dir = data_root / "content-runs" / run.run_id
         verification = json.loads((run_dir / "08_verification.json").read_text())
         publish_pack = json.loads((run_dir / "06_publish_pack.json").read_text())
-        assert verification["locale"] == run.locale_variant.locale
-        assert publish_pack["locale_variant"] == run.locale_variant.model_dump(mode="json")
+        locale_variant = run.locale_variant
+        assert locale_variant is not None
+        assert verification["locale"] == locale_variant.locale
+        assert publish_pack["locale_variant"] == locale_variant.model_dump(mode="json")
         assert publish_pack["publication_performed"] is False
 
 
@@ -664,7 +666,9 @@ def test_distribution_package_requires_approval_and_seals_exact_media(
     assert package is not None
     assert package["publication_performed"] is False
     assert package["locale"] == "en-US"
-    assert package["variant_group_id"].startswith("fact-contract:")
+    variant_group_id = package["variant_group_id"]
+    assert isinstance(variant_group_id, str)
+    assert variant_group_id.startswith("fact-contract:")
     assert package["review_revision"] == review.revision
     assert package["media_quality_review"]["revision"] == quality.revision  # type: ignore[index]
     assert package["channels"]["youtube"]["direct_upload_enabled"] is True  # type: ignore[index]

@@ -8,13 +8,14 @@ from soloscale.content_models import (
     ClaimStatus,
     ContentBrief,
     ContentClaim,
+    ContentRun,
 )
 from soloscale.content_workspace import run_content_workspace
 from soloscale.media_profile import MediaProfile, save_media_profile
 from soloscale.voice_provider import VoiceProviderError, create_narration_assets
 
 
-def _run(tmp_path: Path):
+def _run(tmp_path: Path) -> ContentRun:
     return run_content_workspace(
         data_root=tmp_path,
         brief=ContentBrief(

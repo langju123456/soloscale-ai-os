@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
-from soloscale.content_models import ClaimStatus, ContentBrief, ContentClaim
+from soloscale.content_models import ClaimStatus, ContentBrief, ContentClaim, ContentRun
 from soloscale.content_workspace import run_content_workspace
 from soloscale.presenter_assets import (
+    PresenterAsset,
     PresenterAssetCategory,
     PresenterAssetKind,
     PresenterLayout,
@@ -18,7 +19,7 @@ from soloscale.presenter_assets import (
 from soloscale.video_factory import prepare_heygen_handoff
 
 
-def _run(data_root: Path):
+def _run(data_root: Path) -> ContentRun:
     return run_content_workspace(
         data_root=data_root,
         brief=ContentBrief(
@@ -45,7 +46,9 @@ def _run(data_root: Path):
     )
 
 
-def _import(data_root: Path, category: PresenterAssetCategory, suffix: bytes):
+def _import(
+    data_root: Path, category: PresenterAssetCategory, suffix: bytes
+) -> PresenterAsset:
     return import_presenter_asset(
         data_root=data_root,
         display_name=f"{category.value.title()} pose",

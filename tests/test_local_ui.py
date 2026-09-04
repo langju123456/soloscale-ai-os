@@ -8,9 +8,9 @@ import threading
 import time
 import urllib.parse
 import zipfile
-from http.server import HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 import pytest
 from pydantic import BaseModel
@@ -984,8 +984,8 @@ def test_desktop_resume_download_returns_exactly_one_docx_body(tmp_path: Path) -
             raise AssertionError((status, message))
 
     handler = FakeHandler()
-    _serve_resume_download(  # type: ignore[arg-type]
-        handler,
+    _serve_resume_download(
+        cast(BaseHTTPRequestHandler, handler),
         tmp_path,
         run_id,
         desktop_mode=True,

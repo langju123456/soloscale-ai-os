@@ -12,7 +12,7 @@ import pytest
 from soloscale.evidence_hub import EvidenceHub
 from soloscale.github_connect import GitHubConnectionStore, GitHubReadOnlyClient
 from soloscale.local_ui import UploadedFile, _run_user_resume
-from soloscale.resume_docx import tailor_resume_docx
+from soloscale.resume_docx import TailoredDocx, tailor_resume_docx
 from soloscale.resume_evidence_pack import build_candidate_evidence_pack
 from soloscale.resume_models import CandidateEvidencePack, CandidateProfile
 from soloscale.work_ui import load_work_context, work_page
@@ -166,7 +166,7 @@ def test_github_read_only_selection_evidence_and_resume_boundary(
         template: bytes,
         job_description: str,
         **kwargs: object,
-    ):
+    ) -> TailoredDocx:
         candidate_pack = cast(
             CandidateEvidencePack, kwargs["candidate_evidence_pack"]
         )
