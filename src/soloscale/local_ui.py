@@ -7589,32 +7589,32 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             path,
         )
         if codex_import_job_match is not None:
-            manager = self.codex_import_job_manager
-            snapshot = (
-                manager.get(
+            codex_import_manager = self.codex_import_job_manager
+            codex_import_snapshot = (
+                codex_import_manager.get(
                     self.ui_data_root.absolute(),
                     codex_import_job_match.group(1),
                 )
-                if manager is not None
+                if codex_import_manager is not None
                 else None
             )
-            if snapshot is None:
+            if codex_import_snapshot is None:
                 self.send_error(404, "Codex import job not found")
                 return
             body = json.dumps(
                 {
-                    "job_id": snapshot.job_id,
-                    "phase": snapshot.phase,
-                    "total": snapshot.total,
-                    "processed": snapshot.processed,
-                    "running": snapshot.running,
-                    "imported": snapshot.imported,
-                    "updated": snapshot.updated,
-                    "skipped": snapshot.skipped,
-                    "failed": snapshot.failed,
-                    "failure_codes": list(snapshot.failure_codes),
-                    "created_at": snapshot.created_at,
-                    "updated_at": snapshot.updated_at,
+                    "job_id": codex_import_snapshot.job_id,
+                    "phase": codex_import_snapshot.phase,
+                    "total": codex_import_snapshot.total,
+                    "processed": codex_import_snapshot.processed,
+                    "running": codex_import_snapshot.running,
+                    "imported": codex_import_snapshot.imported,
+                    "updated": codex_import_snapshot.updated,
+                    "skipped": codex_import_snapshot.skipped,
+                    "failed": codex_import_snapshot.failed,
+                    "failure_codes": list(codex_import_snapshot.failure_codes),
+                    "created_at": codex_import_snapshot.created_at,
+                    "updated_at": codex_import_snapshot.updated_at,
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -7880,30 +7880,30 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             path,
         )
         if youtube_job_match is not None:
-            manager = self.youtube_job_manager
-            snapshot = (
-                manager.get(
+            youtube_job_manager = self.youtube_job_manager
+            youtube_snapshot = (
+                youtube_job_manager.get(
                     self.ui_data_root.absolute(), youtube_job_match.group(1)
                 )
-                if manager is not None
+                if youtube_job_manager is not None
                 else None
             )
-            if snapshot is None:
+            if youtube_snapshot is None:
                 self.send_error(404, "YouTube job not found")
                 return
             body = json.dumps(
                 {
-                    "job_id": snapshot.job_id,
-                    "kind": snapshot.kind,
-                    "phase": snapshot.phase,
-                    "progress_percent": snapshot.progress_percent,
-                    "channel_id": snapshot.channel_id,
-                    "run_id": snapshot.run_id,
-                    "video_id": snapshot.video_id,
-                    "video_url": snapshot.video_url,
-                    "error_code": snapshot.error_code,
-                    "error_message": snapshot.error_message,
-                    "updated_at": snapshot.updated_at,
+                    "job_id": youtube_snapshot.job_id,
+                    "kind": youtube_snapshot.kind,
+                    "phase": youtube_snapshot.phase,
+                    "progress_percent": youtube_snapshot.progress_percent,
+                    "channel_id": youtube_snapshot.channel_id,
+                    "run_id": youtube_snapshot.run_id,
+                    "video_id": youtube_snapshot.video_id,
+                    "video_url": youtube_snapshot.video_url,
+                    "error_code": youtube_snapshot.error_code,
+                    "error_message": youtube_snapshot.error_message,
+                    "updated_at": youtube_snapshot.updated_at,
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -8087,14 +8087,16 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 return
             form = _parse_form(self.rfile.read(length)) if length else {}
             self._adopt_ui_locale(form)
-            manager = self.youtube_job_manager
+            youtube_connect_manager = self.youtube_job_manager
             try:
-                if manager is None:
+                if youtube_connect_manager is None:
                     raise YouTubePublishingError(
                         "YouTube background worker is unavailable",
                         code="WORKER_UNAVAILABLE",
                     )
-                job = manager.start_connect(data_root=self.ui_data_root.absolute())
+                youtube_connect_job = youtube_connect_manager.start_connect(
+                    data_root=self.ui_data_root.absolute()
+                )
             except (OSError, YouTubePublishingError) as exc:
                 self._send_creator_accounts_page(str(exc))
                 return
@@ -8104,7 +8106,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 ui_url(
                     "/creator/accounts",
                     self.ui_locale,
-                    youtube_job=job.job_id,
+                    youtube_job=youtube_connect_job.job_id,
                 ),
             )
             self.send_header("Content-Length", "0")
@@ -8120,15 +8122,15 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 return
             form = _parse_form(self.rfile.read(length)) if length else {}
             self._adopt_ui_locale(form)
-            manager = self.youtube_job_manager
+            youtube_cancel_manager = self.youtube_job_manager
             try:
-                if manager is None:
+                if youtube_cancel_manager is None:
                     raise YouTubePublishingError(
                         "YouTube background worker is unavailable",
                         code="WORKER_UNAVAILABLE",
                     )
                 job_id = form.get("job_id", "")
-                job = manager.cancel_connect(
+                youtube_cancel_job = youtube_cancel_manager.cancel_connect(
                     data_root=self.ui_data_root.absolute(),
                     job_id=job_id,
                 )
@@ -8141,7 +8143,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 ui_url(
                     "/creator/accounts",
                     self.ui_locale,
-                    youtube_job=job.job_id,
+                    youtube_job=youtube_cancel_job.job_id,
                 ),
             )
             self.send_header("Content-Length", "0")
@@ -8391,7 +8393,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             outcome = "invalid"
             action = form.get("action")
             if action == "save_profile":
-                values = {
+                heygen_profile_values = {
                     "heygen_avatar_group_id": form.get("avatar_group_id", "").strip(),
                     "heygen_avatar_look_id": form.get("avatar_look_id", "").strip(),
                     "heygen_zh_voice_id": form.get("zh_voice_id", "").strip(),
@@ -8399,14 +8401,15 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 }
                 if all(
                     not value or re.fullmatch(r"[A-Za-z0-9_-]{1,160}", value)
-                    for value in values.values()
+                    for value in heygen_profile_values.values()
                 ):
                     try:
                         profile = load_media_profile_settings(
                             self.ui_data_root.absolute()
                         ).model_copy(
                             update={
-                                key: value or None for key, value in values.items()
+                                key: value or None
+                                for key, value in heygen_profile_values.items()
                             }
                         )
                         save_media_profile(self.ui_data_root.absolute(), profile)
@@ -8656,12 +8659,12 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 )
             else:
                 try:
-                    manager = self.codex_import_job_manager
-                    if manager is None:
+                    codex_import_manager = self.codex_import_job_manager
+                    if codex_import_manager is None:
                         raise WorkContextError(
                             "Codex background import is unavailable."
                         )
-                    job_id = manager.submit(
+                    job_id = codex_import_manager.submit(
                         data_root=self.ui_data_root.absolute(),
                     )
                 except (WorkContextError, OSError, ValueError):
@@ -8789,16 +8792,21 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 self.send_error(413, "GitHub selection request is too large")
                 return
             try:
-                values = urllib.parse.parse_qs(
+                github_selection_values = urllib.parse.parse_qs(
                     self.rfile.read(length).decode("utf-8"),
                     keep_blank_values=False,
                     strict_parsing=False,
                 )
                 self._adopt_ui_locale(
-                    {key: items[0] for key, items in values.items() if items}
+                    {
+                        key: items[0]
+                        for key, items in github_selection_values.items()
+                        if items
+                    }
                 )
                 repository_ids = [
-                    int(value) for value in values.get("repository", [])
+                    int(value)
+                    for value in github_selection_values.get("repository", [])
                 ]
                 if any(repository_id <= 0 for repository_id in repository_ids):
                     raise ValueError("GitHub repository selection is invalid")
@@ -8868,7 +8876,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             form = _parse_form(self.rfile.read(length))
             self._adopt_ui_locale(form)
             try:
-                request = VideoGenerationRequest(
+                video_request = VideoGenerationRequest(
                     topic=form.get("topic", ""),
                     script=form.get("script", ""),
                     platform=form.get("platform", "Short video"),
@@ -8884,13 +8892,16 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                         if x.strip()
                     ],
                 )
-                job = create_job(self._video_data_root(), request)
+                prepared_video_job = create_job(
+                    self._video_data_root(), video_request
+                )
             except (VideoGenerationError, ValueError, OSError) as exc:
                 self._send_video_page(error=str(exc))
                 return
             self.send_response(303)
             self.send_header(
-                "Location", ui_url("/video", self.ui_locale, job_id=job.job_id)
+                "Location",
+                ui_url("/video", self.ui_locale, job_id=prepared_video_job.job_id),
             )
             self.end_headers()
             return
@@ -8929,18 +8940,20 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             form = _parse_form(self.rfile.read(int(self.headers.get("Content-Length", "0") or 0)))
             self._adopt_ui_locale(form)
             try:
-                job = load_job(self._video_data_root(), job_id)
+                video_job = load_job(self._video_data_root(), job_id)
                 if submit_match:
                     if form.get("confirmation") != "PUBLISH":
                         raise VideoGenerationError("Type PUBLISH to authorize the external request")
-                    if job.estimated_cost_usd > 1.0:
+                    if video_job.estimated_cost_usd > 1.0:
                         raise VideoGenerationError(
                             "Estimated cost exceeds the authorized $1.00 limit"
                         )
-                    job = GoogleVeoClient().submit(job)
+                    video_job = GoogleVeoClient().submit(video_job)
                 else:
-                    job = GoogleVeoClient().poll(job, data_root=self._video_data_root())
-                save_job(self._video_data_root(), job)
+                    video_job = GoogleVeoClient().poll(
+                        video_job, data_root=self._video_data_root()
+                    )
+                save_job(self._video_data_root(), video_job)
             except (VideoGenerationError, OSError, ValueError) as exc:
                 self._send_video_page(job_id, str(exc))
                 return
@@ -9012,8 +9025,8 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 return
             form = _parse_form(self.rfile.read(length))
             self._adopt_ui_locale(form)
-            manager = self.creator_production_job_manager
-            if manager is None:
+            production_manager = self.creator_production_job_manager
+            if production_manager is None:
                 self.send_error(503, "Creator production is unavailable")
                 return
             action = form.get("production_action", "article")
@@ -9096,7 +9109,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(400, "Creator production source is invalid")
                 return
-            request = CreatorProductionRequest(
+            production_request = CreatorProductionRequest(
                 source_kind=cast(Literal["STORY", "CREATE"], source_kind),
                 source_story_id=source_story_id,
                 outputs=outputs,
@@ -9104,19 +9117,19 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 ai_editorial=ai_editorial,
                 add_to_queue=add_to_queue,
             )
-            job = manager.submit(
-                data_root=data_root,
-                request=request,
-                runner=runner,
-                renderer=(
-                    lambda run_id: render_creator_video(
-                        data_root=data_root,
-                        run_id=run_id,
-                        repository_root=self.creator_video_root,
-                    )
+
+            def render_production_video(run_id: str) -> None:
+                render_creator_video(
+                    data_root=data_root,
+                    run_id=run_id,
+                    repository_root=self.creator_video_root,
                 )
-                if "VIDEO" in outputs
-                else None,
+
+            production_job = production_manager.submit(
+                data_root=data_root,
+                request=production_request,
+                runner=runner,
+                renderer=render_production_video if "VIDEO" in outputs else None,
                 provider=provider,
                 model=model,
             )
@@ -9126,7 +9139,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 ui_url(
                     "/creator/create",
                     self.ui_locale,
-                    creator_job=job.job_id,
+                    creator_job=production_job.job_id,
                 ),
             )
             self.send_header("Content-Length", "0")
@@ -9387,19 +9400,25 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 self.send_error(413, "Presenter plan request is too large")
                 return
             try:
-                values = urllib.parse.parse_qs(
+                presenter_preference_values = urllib.parse.parse_qs(
                     self.rfile.read(length).decode("utf-8"),
                     keep_blank_values=False,
                     strict_parsing=False,
                 )
                 self._adopt_ui_locale(
-                    {key: items[0] for key, items in values.items() if items}
+                    {
+                        key: items[0]
+                        for key, items in presenter_preference_values.items()
+                        if items
+                    }
                 )
                 save_presenter_preferences(
                     data_root=self.ui_data_root.absolute(),
                     run_id=run_id,
                     evidence_visual_scene_ids=set(
-                        values.get("evidence_visual_scene", [])
+                        presenter_preference_values.get(
+                            "evidence_visual_scene", []
+                        )
                     ),
                 )
             except (OSError, PresenterAssetError, UnicodeError, ValueError) as exc:
@@ -9644,19 +9663,19 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 return
             form = _parse_form(self.rfile.read(length))
             self._adopt_ui_locale(form)
-            manager = self.youtube_job_manager
+            youtube_upload_manager = self.youtube_job_manager
             try:
                 if form.get("confirmation") != "UPLOAD":
                     raise YouTubePublishingError(
                         "Type UPLOAD to authorize this exact external upload",
                         code="UPLOAD_CONFIRMATION_REQUIRED",
                     )
-                if manager is None:
+                if youtube_upload_manager is None:
                     raise YouTubePublishingError(
                         "YouTube background worker is unavailable",
                         code="WORKER_UNAVAILABLE",
                     )
-                request = normalize_upload_request(
+                upload_request = normalize_upload_request(
                     run_id=form.get("run_id", ""),
                     channel_id=form.get("channel_id", ""),
                     title=form.get("title", ""),
@@ -9664,8 +9683,8 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                     tags=form.get("tags", ""),
                     privacy_status=form.get("privacy_status", "private"),
                 )
-                job = manager.start_upload(
-                    data_root=self.ui_data_root.absolute(), request=request
+                upload_job = youtube_upload_manager.start_upload(
+                    data_root=self.ui_data_root.absolute(), request=upload_request
                 )
             except (OSError, YouTubePublishingError) as exc:
                 body = editorial_publishing_page(
@@ -9686,7 +9705,9 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             self.send_header(
                 "Location",
                 ui_url(
-                    "/creator/publish", self.ui_locale, youtube_job=job.job_id
+                    "/creator/publish",
+                    self.ui_locale,
+                    youtube_job=upload_job.job_id,
                 ),
             )
             self.send_header("Content-Length", "0")

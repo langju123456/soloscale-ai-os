@@ -48,6 +48,7 @@ from soloscale.knowledge_store import KnowledgeStore, KnowledgeStoreError
 from soloscale.learning_practice import (
     ExerciseType,
     PracticeLanguage,
+    TutorEscalation,
     create_practice_workspace,
     generate_practice_exercise,
     ingest_practice_completion,
@@ -767,7 +768,7 @@ def learning_exercise_complete(
             tests_passed=tests_passed,
             tests_failed=tests_failed,
             attempts=attempts,
-            hints_used=hint or (),
+            hints_used=[TutorEscalation(value) for value in hint or ()],
             note=note,
             git_commit=git_commit,
         )

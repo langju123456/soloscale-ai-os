@@ -287,7 +287,9 @@ def test_creator_production_jobs_are_persisted_and_listed(tmp_path: Path) -> Non
         )
         jobs = load_creator_production_jobs(data_root)
         assert [job.job_id for job in jobs][:2] == [second.job_id, first.job_id]
-        assert load_creator_production_job(data_root, first.job_id).job_id == first.job_id
+        persisted_first = load_creator_production_job(data_root, first.job_id)
+        assert persisted_first is not None
+        assert persisted_first.job_id == first.job_id
         assert load_creator_production_job(data_root, "missing") is None
     finally:
         manager.shutdown()

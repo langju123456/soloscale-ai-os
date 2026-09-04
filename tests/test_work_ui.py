@@ -418,6 +418,8 @@ def test_work_source_preflight_separates_authorization_freshness_and_trace(
     assert snapshot.github_authorization_state == "NOT_CONNECTED"
     assert snapshot.github_freshness_state == "UNAVAILABLE"
     assert snapshot.github_state == "NOT_CONNECTED"
+    assert snapshot.preflight_trace_id is not None
+    assert snapshot.preflight_at is not None
     assert snapshot.preflight_trace_id.startswith("work-preflight-")
     assert snapshot.preflight_at.endswith("+00:00")
 

@@ -213,8 +213,12 @@ def test_golden_case_writes_private_grounded_traceability_packet(tmp_path: Path)
     ]
     input_payload = _read_json(run_dir / "00_input.json")
     assert input_payload["private_source_bodies_read"] is False
-    assert input_payload["project_binding"]["project_source_id"] == run.project_source_id
-    assert case["project_binding"]["project_source_id"] == run.project_source_id
+    input_project_binding = input_payload["project_binding"]
+    case_project_binding = case["project_binding"]
+    assert isinstance(input_project_binding, dict)
+    assert isinstance(case_project_binding, dict)
+    assert input_project_binding["project_source_id"] == run.project_source_id
+    assert case_project_binding["project_source_id"] == run.project_source_id
 
     anchors = _read_json(run_dir / "03_code_anchors.json")
     code_anchors = anchors["code_anchors"]
@@ -268,8 +272,10 @@ def test_golden_case_writes_private_grounded_traceability_packet(tmp_path: Path)
     assert claim["resume_eligible"] is False
     assert claim["interview_ready"] is False
     assert claim["approved_claim"] is None
-    assert "personal contribution is not proven" in claim["rationale"]
-    assert "personal contribution and L5" not in claim["rationale"]
+    rationale = claim["rationale"]
+    assert isinstance(rationale, str)
+    assert "personal contribution is not proven" in rationale
+    assert "personal contribution and L5" not in rationale
     assert verification["tests_executed_by_learning_run"] is False
     assert verification["approved_claim_created"] is False
     assert EvidenceHub(data_root).status().asset_count == len(ARTIFACT_FILES)

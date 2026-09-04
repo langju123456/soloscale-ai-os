@@ -402,13 +402,13 @@ def test_ci_cd_completion_passes_with_valid_workflow_without_auto_mastery(
         (PracticeStage.EXPLAIN, "explain"),
         (PracticeStage.TRACE, "trace"),
     ):
-        receipt = workspace / f"{name}.md"
-        receipt.write_text(f"{name} evidence", encoding="utf-8")
+        receipt_path = workspace / f"{name}.md"
+        receipt_path.write_text(f"{name} evidence", encoding="utf-8")
         store.record_attempt(
             case_id=exercise.case_id,
             stage=stage,
             outcome=AttemptOutcome.PASS,
-            receipt_path=receipt,
+            receipt_path=receipt_path,
         )
     workflow = workspace / ".github" / "workflows" / "ci.yml"
     workflow.write_text(

@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from typing import Literal
 
 from soloscale.content_canon import load_month_one_canon
 from soloscale.content_models import ContentReviewDecision
@@ -26,7 +27,9 @@ def _seal_video_files(data_root: Path, run_id: str) -> None:
 
 
 def _draft_artifacts(
-    data_root: Path, run_id: str, outputs: list[str]
+    data_root: Path,
+    run_id: str,
+    outputs: list[Literal["ARTICLE", "VIDEO"]],
 ) -> None:
     if "VIDEO" in outputs:
         _seal_video_files(data_root, run_id)
@@ -449,7 +452,8 @@ def test_history_card_shows_template_provider_and_zero_model_calls(
 ) -> None:
     data_root = tmp_path / ".soloscale"
     result = run_content_form(_content_form(), data_root)
-    assert result.run_id is not None
+    run_id = result.run_id
+    assert run_id is not None
 
     manager = CreatorProductionJobManager()
     job = manager.submit(
@@ -461,7 +465,7 @@ def test_history_card_shows_template_provider_and_zero_model_calls(
             language="English",
             ai_editorial=False,
         ),
-        runner=lambda: result.run_id,
+        runner=lambda: run_id,
         provider="template",
         model=None,
     )
