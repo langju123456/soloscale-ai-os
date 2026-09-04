@@ -8,6 +8,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 from soloscale.evidence_hub import EvidenceHub
 from soloscale.ui_shell import SourceState, render_source_state
 from soloscale.work_ui import (
@@ -164,10 +166,13 @@ def test_chatgpt_import_is_explicit_source_preserving_and_body_free_in_ui(
 
 def test_codex_import_and_selected_git_project_reuse_existing_intake(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data_root = tmp_path / "data"
     private_text = "PRIVATE CODEX IMPLEMENTATION NOTE"
-    codex_home = tmp_path / "home" / ".codex"
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    codex_home = home / ".codex"
     session = codex_home / "sessions" / "2026" / "session.jsonl"
     session.parent.mkdir(parents=True)
     session.write_text(_codex_session(private_text), encoding="utf-8")
@@ -197,7 +202,7 @@ def test_codex_import_and_selected_git_project_reuse_existing_intake(
     snapshot = load_work_context(
         data_root,
         workspace_root=project,
-        home=tmp_path / "home",
+        home=home,
     )
 
     assert result.imported == 1
