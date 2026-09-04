@@ -1,107 +1,213 @@
 # SoloScale AI OS
 
-SoloScale turns real engineering work into traceable evidence, learning workflows, job artifacts, and publishable proof — with deterministic verification and explicit human gates.
+**A local-first, human-controlled applied AI workflow system for turning real engineering work into verified evidence, learning workflows, job artifacts, and publishable proof.**
 
-## What it is
+[**Watch the Hero Demo →**](https://soloscale-showcase.vercel.app/showcase/soloscale-hero-demo-v1)
 
-SoloScale is a local-first, human-controlled AI workflow system. Instead of treating AI as an isolated chat box, it routes work through a small number of bounded roles (planner, executor, reviewer, human gate), keeps a deterministic evidence trail, and turns verified work into learning, resume, and content artifacts that a human reviews before anything leaves the machine.
+> Current package: `0.4.1` · Python `3.11+` · Local-first · Human-controlled
 
-It is intentionally **not** a fully autonomous agent. Code owns the loop: state transitions, retry budgets, cost limits, timeouts, approvals, and completion checks are all deterministic.
+**Engineering signals:** agentic workflows · RAG / evidence retrieval · structured model outputs · deterministic validation · provider routing · OAuth integrations · CLI / local UI / macOS · Python quality tooling: pytest · Ruff · mypy
+
+---
+
+## What this repository demonstrates
+
+| Engineering area | SoloScale implementation |
+| --- | --- |
+| Agentic workflows | Bounded planner, executor, reviewer, and human-gate contracts with deterministic state and receipts outside the model |
+| State & recovery | Explicit state transitions, persisted run continuity, bounded model/retrieval retries, timeouts, completion checks, and approval receipts |
+| RAG / evidence | Local SQLite + FTS knowledge index, bounded retrieval, evidence citations, hash lineage, and claim validation |
+| Structured AI outputs | Pydantic-validated model contracts keep generated candidates separate from verified facts and approved outputs |
+| Evaluation | Synthetic retrieval/context gates plus citation-lineage, schema, packaging, and deterministic acceptance checks |
+| Provider routing | Local Ollama, an explicit OpenAI-compatible path, a hosted gateway, and optional local MLX—with no implicit provider fallback |
+| Human-in-the-loop AI | Public, paid, destructive, credential, and irreversible actions remain explicitly gated |
+| Developer tooling | Python package, CLI, local web UI, versioned Skills, receipts, and inspectable run artifacts |
+| Productization | Optional native macOS desktop app and Remotion / TypeScript video-rendering surfaces |
+| External integrations | YouTube OAuth/upload, read-only GitHub metadata, LinkedIn/X handoffs, and a paid-operation-gated HeyGen provider |
+| Quality tooling | pytest, Ruff, strict mypy configuration, deterministic checks, and package/build tooling |
+
+---
+
+## Why SoloScale exists
+
+Most AI demos stop when the model returns an answer.
+
+Real AI products have to handle everything around that answer:
+
+* What evidence was retrieved?
+* What is the model allowed to infer?
+* What happens when a step fails?
+* Who owns retries and state transitions?
+* How is an output validated?
+* When should a human approve an external action?
+* How can real engineering work become reusable evidence instead of disappearing after the task is complete?
+
+SoloScale is my exploration of those applied AI engineering problems.
+
+Instead of giving an autonomous agent unlimited control, **code owns the execution loop** while models operate inside bounded roles.
+
+```text
+REAL WORK
+   ↓
+EVIDENCE / RETRIEVAL
+   ↓
+MODEL REASONING
+   ↓
+VALIDATION / EVAL
+   ↓
+HUMAN REVIEW
+   ↓
+RESUME · LEARNING · CONTENT · EXTERNAL ACTION
+```
+
+---
 
 ## Current product surface
 
-The mainline ships a Python package (`soloscale`) with a CLI and a local web UI, plus optional macOS desktop and video-rendering surfaces.
+### Work & Evidence
 
-- **Deterministic workflow** — Task Envelope → route decision → guarded state machine → append-only run events → approval receipts → Execution Packet.
-- **Evidence** — EvidenceHub plus a private, local knowledge index (SQLite + FTS) built from defensively parsed local Codex sessions and operator-supplied ChatGPT exports.
-- **Resume / Application** — turns a job description plus an operator-supplied candidate profile into a draft and a skill–evidence graph. Resume facts come only from the operator's profile, never from retrieval candidates. Application bundles are staged and human-reviewed.
-- **Learning** — Casebook turns resolved engineering incidents into evidence-backed interview practice (Explain → Trace → Rebuild → Debug → Defend), with a local Control Tower that shows one exact next action.
-- **Creator / Content** — Content Studio drafts LinkedIn/X posts from approved evidence; Creator and Editorial flows organize video/content production into reviewable, human-gated packages.
-- **Publish** — platform accounts and publishing are staged and human-gated. Nothing is published automatically.
+SoloScale captures structured evidence from real engineering activity and turns it into reusable inputs for downstream workflows.
 
-## Canonical domains
+The local Evidence system combines:
+
+* engineering artifacts
+* Git metadata
+* local Codex session data
+* operator-supplied ChatGPT exports
+* project runs and validation artifacts
+* external outcome metadata
+
+Retrieval is bounded and treated as untrusted input. Retrieved text can support reasoning, but retrieval alone does not authorize a public claim.
+
+### Resume & Applications
+
+A job description plus an operator-supplied candidate profile can produce:
+
+* targeted resume drafts
+* skill–evidence graphs
+* explicit evidence gaps
+* reviewable application bundles
+
+Candidate facts remain separate from retrieval candidates.
+
+### Engineering Learning
+
+Resolved engineering work can become structured interview practice through:
 
 ```text
-Real work
-   ↓
-Work / Evidence
-   ├── Resume / Application
-   ├── Learning
-   ├── Career interpretation
-   └── Creator / Content
-              ↓
-           Publish
-              ↓
-       External outcomes
+Explain → Trace → Rebuild → Debug → Defend
 ```
 
-AI providers and integrations support these domains; they are not domains themselves.
+Completing software work does not automatically imply human mastery.
 
-**Career ownership:** Career interprets the canonical evidence, application, learning, and story truth produced by the other domains. It does not own a second parallel database of those facts.
+### Creator & Content
 
-## Truth boundaries
+Verified engineering evidence can be transformed into reviewable:
 
-SoloScale separates four kinds of behavior and labels each one:
+* LinkedIn drafts
+* X threads
+* technical stories
+* diagrams
+* video/storyboard packages
 
-| Behavior | Where it lives |
-|---|---|
-| Deterministic verification | state machine, event store, receipts, hashes, schema checks |
-| Model-generated suggestions | bounded evidence agent and structured-output provider calls |
-| Human approval | publication, spending, destructive actions, and irreversible steps |
-| External side effects | optional provider and publishing integrations |
+External publication remains human-controlled.
 
-Retrieved text is untrusted. The local Evidence Agent is code-limited to bounded search with fixed query/round/context budgets, and every declared claim must cite an in-context chunk from the same run. Prompt injection and citation gaps remain possible, so human review is required before promotion.
+---
 
-## Optional integrations
+## Architecture
 
-These are implemented but not required to run the core:
+```mermaid
+flowchart LR
+    W[Real Engineering Work] --> E[EvidenceHub]
+    E --> R[Retrieval / Evidence Agent]
+    R --> M[Model / Structured Output]
+    M --> V[Validation & Evals]
+    V --> H[Human Review]
 
-- **Local models** — Ollama (Evidence Agent) and MLX (`media_runtime/qwen_mlx_worker.py`).
-- **Provider gateway** — Ollama, an explicitly configured OpenAI-compatible endpoint, and a hosted gateway; no credentials are embedded.
-- **YouTube** — OAuth-based publishing through `platform_accounts` / `youtube_publishing`.
-- **LinkedIn / X** — drafts and publish-queue handoff through Content Studio and BuildLog.
-- **HeyGen** — a bounded avatar-segment provider behind a paid-operation authorization gate.
-- **GitHub** — connection store for the local-to-cloud path.
-- **BuildLog** — a separate downstream evidence-to-story and publishing system; SoloScale keeps only adapter and handoff code (see below).
+    H --> C[Resume / Applications]
+    H --> L[Learning]
+    H --> P[Creator / Content]
 
-## BuildLog boundary
+    P --> X[External Publishing]
+    X --> O[Outcome Evidence]
+    O --> E
+```
 
-BuildLog is an independent project with its own repository. SoloScale keeps the minimum adapter and handoff code (`buildlog_adapter.py`, `buildlog_handoff.py`, `editorial_publishing_handoff.py`, and the conversation-intake parsers) to read BuildLog data and stage publishing handoffs. The BuildLog source itself is **not vendored** here; the optional publishing handoffs require BuildLog to be installed separately.
+The model helps reason and generate.
 
-## Dogfood / showcase
+**Code owns control flow.**
 
-The Hero Demo is public proof of the product, not a core subsystem:
+State transitions, retry budgets, timeouts, approvals, validation, and completion checks remain deterministic.
 
-[Hero Demo v1](https://soloscale-showcase.vercel.app/showcase/soloscale-hero-demo-v1)
+---
+
+## Tech stack
+
+### Core
+
+* Python 3.11+
+* Pydantic
+* Typer
+* Rich
+* SQLite + FTS
+* pytest
+* Ruff
+* strict mypy
+
+### AI / model integrations
+
+* Ollama
+* MLX
+* configurable OpenAI-compatible endpoints
+* hosted provider gateway
+* structured model outputs
+
+### External integrations
+
+* Google / YouTube OAuth and upload
+* LinkedIn / X handoffs through BuildLog
+* read-only GitHub metadata
+* HeyGen behind an explicit paid-operation gate
+
+BuildLog is a separate downstream project and is not vendored in this repository. SoloScale keeps only the adapter and handoff boundary needed to stage compatible publishing workflows.
+
+### Product surfaces
+
+* Python package
+* CLI
+* local web UI
+* native macOS desktop app
+* Remotion / TypeScript video rendering
+
+---
+
+## Hero Demo
+
+The public Hero Demo shows the product workflow rather than only describing the architecture.
+
+**[Open SoloScale Hero Demo v1 →](https://soloscale-showcase.vercel.app/showcase/soloscale-hero-demo-v1)**
+
+---
 
 ## Quick start
-
-### Core (local, Python)
-
-Requires Python 3.11+.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+
 pip install -e '.[dev]'
 
 soloscale demo
 python -m soloscale.local_ui
 ```
 
-The local UI opens at `http://127.0.0.1:8765` by default.
+The local UI opens at:
 
-Representative CLI commands:
-
-```bash
-soloscale task-create --title "..." --goal "..." --repo "..." --branch "..."
-soloscale case-create --case-id "..." --title "..." --project "..."
-soloscale knowledge-sync
-soloscale evidence-agent "your question"
-soloscale control-tower-build
+```text
+http://127.0.0.1:8765
 ```
 
-Run the checks:
+Run the engineering checks:
 
 ```bash
 pytest
@@ -109,30 +215,83 @@ ruff check .
 mypy src tests
 ```
 
-### Optional surfaces
+---
 
-- **Video** — `cd video_factory && npm install && npm run build` (Remotion/TypeScript).
-- **macOS desktop** — Swift sources in `desktop/macos/`; backend packaging in `packaging/macos/`.
-- **Provider integrations** — supply credentials through the documented environment/Keychain path; the core runs without them.
+## Representative CLI workflows
+
+```bash
+soloscale task-create \
+  --title "..." \
+  --goal "..." \
+  --repo "..." \
+  --branch "..."
+
+soloscale knowledge-sync
+
+soloscale evidence-agent "your question"
+
+soloscale case-create \
+  --case-id "..." \
+  --title "..." \
+  --project "..."
+
+soloscale control-tower-build
+```
+
+---
 
 ## Repository map
 
 ```text
-src/soloscale/      product source (domains and adapters)
-tests/              deterministic tests
-desktop/macos/      optional macOS desktop app
-video_factory/      optional Remotion video renderer
-media_runtime/      optional local MLX worker
-packaging/macos/    desktop backend packaging
-.agents/skills/     repo-scoped agent skills
-docs/               architecture, ADRs, operating manual
-examples/           dogfood inputs
-scripts/            bootstrap, demo, and packaging scripts
+src/soloscale/      Core product domains and adapters
+tests/              Deterministic test suite
+desktop/macos/      Native macOS desktop application
+video_factory/      Remotion / TypeScript video renderer
+media_runtime/      Optional local MLX worker
+packaging/macos/    Desktop backend packaging
+.agents/skills/     Versioned bounded agent Skills
+docs/               Architecture, ADRs, and operating documentation
+examples/           Dogfood and example inputs
+scripts/            Bootstrap, demo, validation, and packaging utilities
 ```
 
-## What SoloScale is not
+---
 
-- Not a multi-tenant or enterprise executor.
-- Not a scraper of signed-in ChatGPT or browser accounts.
-- Not an autonomous publisher; every external action stays human-gated.
-- Not a claim of production customer adoption or measured commercial demand.
+## Design principles
+
+### Models reason; code controls
+
+Models are useful for planning, interpretation, extraction, and generation.
+
+They do not silently own retries, irreversible actions, or completion semantics.
+
+### Retrieval is evidence, not truth
+
+Retrieved text can inform a decision.
+
+It does not automatically become a verified fact or public claim.
+
+### Human control stays explicit
+
+Publishing, spending, destructive operations, credential changes, and other irreversible actions remain behind explicit human gates.
+
+### The system should be inspectable
+
+Important decisions produce structured state, evidence, validation results, or receipts that can be inspected later.
+
+---
+
+## Project status
+
+SoloScale is an actively developed applied AI engineering project and dogfood environment.
+
+It demonstrates implemented engineering workflows and product surfaces.
+
+It does **not** claim:
+
+* production customer adoption
+* measured commercial demand
+* enterprise multi-tenancy
+* fully autonomous external execution
+
+Those boundaries are intentional and documented.
