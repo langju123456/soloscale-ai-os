@@ -6,7 +6,7 @@
 
 > Current package: `0.4.1` · Python `3.11+` · Local-first · Human-controlled
 
-**Engineering signals:** agentic workflows · RAG / evidence retrieval · structured model outputs · deterministic validation · provider routing · OAuth integrations · CLI / local UI / macOS · pytest / Ruff / strict mypy
+**Engineering signals:** agentic workflows · RAG / evidence retrieval · structured model outputs · deterministic validation · provider routing · OAuth integrations · CLI / local UI / macOS · Python quality tooling: pytest · Ruff · mypy
 
 ---
 
@@ -24,7 +24,7 @@
 | Developer tooling | Python package, CLI, local web UI, versioned Skills, receipts, and inspectable run artifacts |
 | Productization | Optional native macOS desktop app and Remotion / TypeScript video-rendering surfaces |
 | External integrations | YouTube OAuth/upload, read-only GitHub metadata, LinkedIn/X handoffs, and a paid-operation-gated HeyGen provider |
-| Engineering quality | pytest, Ruff, strict mypy, deterministic checks, and package/build validation |
+| Quality tooling | pytest, Ruff, strict mypy configuration, deterministic checks, and package/build tooling |
 
 ---
 
