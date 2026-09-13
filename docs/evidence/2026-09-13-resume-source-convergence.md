@@ -46,6 +46,8 @@ clean-source marker. The App build accepts that sidecar
 only when its receipt matches the App's exact source commit. The deterministic
 validation launcher then reads the embedded receipt again and rejects missing,
 abbreviated, dirty, mismatched, malformed, or symlinked provenance before launch.
+The App build strips Swift debug symbols and fails if the private checkout path remains
+embedded in the packaged executable.
 
 ## Local verification
 

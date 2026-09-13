@@ -94,6 +94,10 @@ binary="$swift_bin_root/SoloScaleDesktop"
 [[ -x "$binary" ]] || fail "Swift build did not create SoloScaleDesktop"
 mkdir -p "$app_root/Contents/MacOS" "$app_root/Contents/Resources"
 cp "$binary" "$app_root/Contents/MacOS/SoloScaleDesktop"
+/usr/bin/strip -S "$app_root/Contents/MacOS/SoloScaleDesktop"
+if LC_ALL=C /usr/bin/grep -a -F -q "$project_root" "$app_root/Contents/MacOS/SoloScaleDesktop"; then
+  fail "Swift executable still contains the private build path after stripping"
+fi
 cp "$desktop_root/Info.plist.template" "$app_root/Contents/Info.plist"
 /usr/bin/ditto "$sidecar_root" "$app_root/Contents/Resources/SoloScaleBackend"
 /usr/bin/plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$app_root/Contents/Info.plist"
