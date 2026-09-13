@@ -699,12 +699,17 @@ def _pdf_text_quality(text: str) -> _PDFTextQuality:
         and short_line_ratio >= 0.90
         and meaningful_lines == 0
     )
+    # Positioned PDF text may contain readable glyphs and occasional whole words,
+    # but still split a resume into hundreds of one/two-character fragments.
+    # Recover the complete text with the existing fallback, never truncate lines.
+    predominantly_fragmented = len(lines) >= 20 and short_line_ratio >= 0.75
     replacement_corruption = replacement_ratio >= 0.08
     nontextual = printable_ratio < 0.90 or textual_ratio < 0.35
     no_natural_language = meaningful_lines == 0 and not wordlike_sequences
 
     usable = not (
-        (fragmented and (replacement_corruption or no_natural_language))
+        predominantly_fragmented
+        or (fragmented and (replacement_corruption or no_natural_language))
         or (replacement_corruption and nontextual)
         or (len(lines) >= 4 and nontextual and no_natural_language)
     )
