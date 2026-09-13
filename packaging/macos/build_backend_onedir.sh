@@ -7,6 +7,10 @@ output_root="${1:-$project_root/packaging/macos/dist}"
 spec_file="$project_root/packaging/macos/SoloScaleBackend.spec"
 fail() { echo "macOS packaging: $*" >&2; exit 1; }
 
+git_commit="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
+[[ "$git_commit" =~ ^[0-9a-f]{40}$ ]] || fail "source commit is unavailable or not a full Git SHA"
+git_status="$(git -C "$project_root" status --porcelain --untracked-files=normal 2>/dev/null)" || fail "source worktree status is unavailable"
+[[ -z "$git_status" ]] || fail "source worktree must be clean and fully committed before building the backend"
 [[ "$(uname -s)" == "Darwin" ]] || fail "must run on macOS"
 [[ -x "$python_bin" ]] || fail "Python environment is missing: $python_bin"
 [[ -f "$spec_file" && -f "$project_root/src/soloscale/local_ui.py" ]] || fail "SoloScale packaging inputs are missing"
@@ -29,4 +33,28 @@ fi
 [[ -f "$output_root/SoloScaleBackend/_internal/video_factory/render.mjs" ]] || fail "Creator Video renderer was not packaged"
 [[ -d "$output_root/SoloScaleBackend/_internal/video_factory/node_modules/@remotion/renderer" ]] || fail "Creator Video dependencies were not packaged"
 [[ -f "$output_root/SoloScaleBackend/_internal/media_runtime/qwen_mlx_worker.py" ]] || fail "Local Qwen media worker was not packaged"
+receipt="$output_root/SoloScaleBackend/source-provenance.json"
+"$python_bin" - "$receipt" "$git_commit" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+receipt = Path(sys.argv[1])
+payload = {
+    "source_sha": sys.argv[2],
+    "dirty": False,
+}
+with tempfile.NamedTemporaryFile(
+    mode="w", encoding="utf-8", dir=receipt.parent, delete=False
+) as stream:
+    json.dump(payload, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+    temporary_path = Path(stream.name)
+os.replace(temporary_path, receipt)
+PY
+[[ -f "$receipt" && ! -L "$receipt" ]] || fail "backend source provenance receipt was not created safely"
 echo "$output_root/SoloScaleBackend"

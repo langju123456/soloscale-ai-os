@@ -11,6 +11,14 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from soloscale.models import ContractModel, utc_now
 
+MAX_RESUME_PROFILE_ENTRIES = 120
+MAX_RESUME_EXPERT_REVIEW_PATCHES = MAX_RESUME_PROFILE_ENTRIES
+MAX_RESUME_ATOMIC_FACTS = MAX_RESUME_PROFILE_ENTRIES * 12
+PROFILE_ENTRY_ID_PATTERN = r"^PROFILE-\d{2,3}$"
+RESUME_FACT_ID_PATTERN = (
+    r"^FACT-(?:PROFILE-\d{2,3}|EVIDENCE-[A-Z0-9-]+)-\d{2}$"
+)
+
 
 class ResumeMode(StrEnum):
     LOCAL_ONLY = "local-only"
@@ -75,6 +83,21 @@ class CandidateProfile(ContractModel):
         return [value.strip() for value in values if value.strip()]
 
 
+class ResumeProfileLimitError(ValueError):
+    """The uploaded profile is too large for one bounded generation request."""
+
+
+def validate_resume_profile_entry_count(profile: CandidateProfile) -> None:
+    entry_count = len(profile.experience_bullets) + len(profile.project_bullets)
+    if entry_count > MAX_RESUME_PROFILE_ENTRIES:
+        raise ResumeProfileLimitError(
+            "Resume generation supports at most "
+            f"{MAX_RESUME_PROFILE_ENTRIES} experience and project bullets; "
+            f"the uploaded resume contains {entry_count}. Reduce the bullet count "
+            "and try again."
+        )
+
+
 _ATOMIC_FACT_SPLIT_RE = re.compile(r"(?:[.;；]\s+|\s+[—–]\s+)")
 
 
@@ -122,11 +145,11 @@ class ResumeAtomicFactAdmissionError(ValueError):
 class ResumeAtomicFact(ContractModel):
     """One immutable fact identity derived from an approved profile entry."""
 
-    fact_id: str = Field(
-        pattern=r"^FACT-(?:PROFILE-\d{2}|EVIDENCE-[A-Z0-9-]+)-\d{2}$"
+    fact_id: str = Field(pattern=RESUME_FACT_ID_PATTERN)
+    profile_entry_id: str = Field(pattern=PROFILE_ENTRY_ID_PATTERN)
+    evidence_id: str = Field(
+        pattern=r"^(?:PROFILE-\d{2,3}|EVIDENCE-[A-Z0-9-]+)$"
     )
-    profile_entry_id: str = Field(pattern=r"^PROFILE-\d{2}$")
-    evidence_id: str = Field(pattern=r"^(?:PROFILE-\d{2}|EVIDENCE-[A-Z0-9-]+)$")
     source_kind: Literal["PROFILE_ENTRY", "CANDIDATE_EVIDENCE"]
     project: str | None = Field(default=None, max_length=120)
     capability_tags: list[str] = Field(default_factory=list, max_length=12)
@@ -192,6 +215,7 @@ def admit_resume_atomic_facts(
 ) -> tuple[list[ResumeAtomicFact], ResumeAtomicFactAdmissionTrace]:
     """Admit approved facts independently and quarantine only invalid fragments."""
 
+    validate_resume_profile_entry_count(profile)
     entries = profile.experience_bullets + profile.project_bullets
     facts: list[ResumeAtomicFact] = []
     total = 0
@@ -253,7 +277,7 @@ def build_resume_atomic_facts(profile: CandidateProfile) -> list[ResumeAtomicFac
 class GroundedResumeBulletRewrite(ContractModel):
     """One model-authored bullet anchored to explicit approved profile entries."""
 
-    profile_entry_id: str = Field(pattern=r"^PROFILE-\d{2}$")
+    profile_entry_id: str = Field(pattern=PROFILE_ENTRY_ID_PATTERN)
     kind: Literal["REWRITE", "SYNTHESIS"] = "REWRITE"
     text: str = Field(min_length=1, max_length=600)
     source_profile_entry_ids: list[str] = Field(default_factory=list, max_length=8)
@@ -304,9 +328,13 @@ class RoleStrategy(ContractModel):
 
     role_summary: str = Field(min_length=1, max_length=500)
     top_hiring_signals: list[str] = Field(min_length=1, max_length=8)
-    evidence_priority: list[str] = Field(min_length=1, max_length=80)
+    evidence_priority: list[str] = Field(
+        min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES
+    )
     skill_priority: list[str] = Field(default_factory=list, max_length=40)
-    bullet_rewrites: list[GroundedResumeBulletRewrite] = Field(min_length=1, max_length=80)
+    bullet_rewrites: list[GroundedResumeBulletRewrite] = Field(
+        min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES
+    )
     summary_rewrite: GroundedResumeSummaryRewrite | None = None
     unsupported_requirements: list[str] = Field(default_factory=list, max_length=16)
     rewrite_guidance: str = Field(min_length=1, max_length=800)
@@ -424,9 +452,7 @@ class CompositionEvidencePlan(ContractModel):
 class ResumeEvidenceAdoptionTrace(ContractModel):
     """Body-free lifecycle for one fact considered by Resume composition."""
 
-    fact_id: str = Field(
-        pattern=r"^FACT-(?:PROFILE-\d{2}|EVIDENCE-[A-Z0-9-]+)-\d{2}$"
-    )
+    fact_id: str = Field(pattern=RESUME_FACT_ID_PATTERN)
     retrieved: bool = True
     admitted: bool
     sent_to_model: bool
@@ -465,10 +491,14 @@ class ResumeEvidenceRetrievalTrace(ContractModel):
     retrieved_count: int = Field(ge=0)
     admitted_count: int = Field(ge=0)
     sent_count: int = Field(ge=0)
-    admitted_fact_ids: list[str] = Field(default_factory=list, max_length=960)
-    sent_fact_ids: list[str] = Field(default_factory=list, max_length=960)
+    admitted_fact_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_RESUME_ATOMIC_FACTS
+    )
+    sent_fact_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_RESUME_ATOMIC_FACTS
+    )
     adoption: list[ResumeEvidenceAdoptionTrace] = Field(
-        default_factory=list, max_length=960
+        default_factory=list, max_length=MAX_RESUME_ATOMIC_FACTS
     )
 
     @model_validator(mode="after")
@@ -505,7 +535,9 @@ class CandidateEvidencePack(ContractModel):
 
     schema_version: Literal["1.0"] = "1.0"  # type: ignore[assignment]
     sources: list[CandidateEvidenceSource] = Field(default_factory=list, max_length=32)
-    atomic_facts: list[ResumeAtomicFact] = Field(min_length=1, max_length=960)
+    atomic_facts: list[ResumeAtomicFact] = Field(
+        min_length=1, max_length=MAX_RESUME_ATOMIC_FACTS
+    )
     fact_admission: ResumeAtomicFactAdmissionTrace | None = None
     composition_plan: CompositionEvidencePlan | None = None
     pack_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -569,11 +601,11 @@ class ResumeHiringSignalReceipt(ContractModel):
 class ResumeClaimProvenance(ContractModel):
     """One rendered resume slot and all approved sources that support it."""
 
-    claim_id: str = Field(pattern=r"^CLAIM-\d{2}$")
+    claim_id: str = Field(pattern=r"^CLAIM-\d{2,3}$")
     render_location: Literal["SUMMARY", "BULLET"]
     final_text: str = Field(min_length=1, max_length=800)
     final_text_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    profile_entry_id: str = Field(pattern=r"^(?:PROFILE-\d{2}|SUMMARY)$")
+    profile_entry_id: str = Field(pattern=r"^(?:PROFILE-\d{2,3}|SUMMARY)$")
     approved_source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_ids: list[str] = Field(min_length=1, max_length=8)
     approved_evidence_sha256s: list[str] = Field(min_length=1, max_length=8)
@@ -610,7 +642,7 @@ class ResumeClaimProvenance(ContractModel):
             raise ValueError("source fact identities must be unique")
         if any(
             re.fullmatch(
-                r"FACT-(?:PROFILE-\d{2}|EVIDENCE-[A-Z0-9-]+)-\d{2}",
+                r"FACT-(?:PROFILE-\d{2,3}|EVIDENCE-[A-Z0-9-]+)-\d{2}",
                 fact_id,
             )
             is None
@@ -688,7 +720,9 @@ class ResumeProvenanceReceipt(ContractModel):
     hiring_signals: list[ResumeHiringSignalReceipt] = Field(
         default_factory=list, max_length=8
     )
-    claims: list[ResumeClaimProvenance] = Field(min_length=1, max_length=81)
+    claims: list[ResumeClaimProvenance] = Field(
+        min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES + 1
+    )
     unsupported_requirement_sha256s: list[str] = Field(default_factory=list, max_length=16)
     all_exported_claims_supported: Literal[True] = True
     final_human_review_required: Literal[True] = True
@@ -718,7 +752,7 @@ class ResumeProvenanceReceipt(ContractModel):
 class ResumeExpertReviewPatch(ContractModel):
     """One evidence-preserving wording patch from the optional expert reviewer."""
 
-    profile_entry_id: str = Field(pattern=r"^PROFILE-\d{2}$")
+    profile_entry_id: str = Field(pattern=PROFILE_ENTRY_ID_PATTERN)
     before_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     after: str = Field(min_length=1, max_length=600)
     new_factual_claims: list[str] = Field(default_factory=list, max_length=8)
@@ -729,9 +763,11 @@ class ResumeExpertReviewResult(ContractModel):
     """Patch-only expert review; deterministic code owns acceptance."""
 
     summary: str = Field(min_length=1, max_length=800)
-    patches: list[ResumeExpertReviewPatch] = Field(default_factory=list, max_length=80)
+    patches: list[ResumeExpertReviewPatch] = Field(
+        default_factory=list, max_length=MAX_RESUME_EXPERT_REVIEW_PATCHES
+    )
     omitted_high_value_profile_entry_ids: list[str] = Field(
-        default_factory=list, max_length=16
+        default_factory=list, max_length=MAX_RESUME_PROFILE_ENTRIES
     )
 
     @model_validator(mode="after")
@@ -861,3 +897,480 @@ class ResumeDeliveryReceipt(ContractModel):
     application_library_path: str | None = None
     error_type: str | None = None
     retry_safe: bool = False
+
+
+class EvidenceCandidateClass(StrEnum):
+    """Retrieval-time classification. Final claim eligibility is decided downstream."""
+
+    DIRECT = "direct"
+    SEMANTIC = "semantic"
+    ADJACENT_CAPABILITY = "adjacent_capability"
+    POTENTIAL_DERIVATION = "potential_derivation"
+    WEAK = "weak"
+    IRRELEVANT = "irrelevant"
+
+
+class ResumeRetrievalSourceKind(StrEnum):
+    MAC_CATALOG = "mac_catalog"
+    LOCAL_GIT = "local_git"
+    KNOWLEDGE_STORE = "knowledge_store"
+    EVIDENCE_HUB = "evidence_hub"
+    RESUME_LIBRARY = "resume_library"
+    BUILDLOG = "buildlog"
+    CODEX = "codex"
+    CHATGPT = "chatgpt"
+    GITHUB = "github"
+
+
+class ResumeRetrievalCandidate(ContractModel):
+    """One high-recall candidate with intact provenance; no final claim decision."""
+
+    candidate_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_kind: ResumeRetrievalSourceKind
+    source_identity: str = Field(min_length=1, max_length=300)
+    evidence_id: str | None = None
+    evidence_type: str = Field(min_length=1, max_length=80)
+    authority: str = Field(min_length=1, max_length=300)
+    text: str = Field(min_length=1, max_length=4000)
+    signals: list[str] = Field(default_factory=list, max_length=40)
+    candidate_class: EvidenceCandidateClass = EvidenceCandidateClass.IRRELEVANT
+    rationale: str = Field(min_length=1, max_length=400)
+    provenance: dict[str, str] = Field(default_factory=dict)
+    score: float = Field(ge=0)
+    requirement_classes: dict[str, EvidenceCandidateClass] = Field(default_factory=dict)
+    requirement_signals: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ResumeRequirementExpansion(ContractModel):
+    """Bounded normalized requirement with capability-aware search vocabulary."""
+
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    text: str = Field(min_length=1, max_length=2000)
+    capability: str = Field(min_length=1, max_length=120)
+    technology_terms: list[str] = Field(default_factory=list, max_length=24)
+    synonyms: list[str] = Field(default_factory=list, max_length=80)
+    expanded_terms: list[str] = Field(default_factory=list, max_length=104)
+    likely_evidence_forms: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ResumeRetrievalCoverage(ContractModel):
+    """One requirement's evidence coverage buckets; classifies, never destroys."""
+
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    normalized_capability: str = Field(min_length=1, max_length=120)
+    direct_evidence: list[str] = Field(default_factory=list, max_length=600)
+    semantic_evidence: list[str] = Field(default_factory=list, max_length=600)
+    related_projects: list[str] = Field(default_factory=list, max_length=600)
+    potential_derivations: list[str] = Field(default_factory=list, max_length=600)
+    weak_evidence: list[str] = Field(default_factory=list, max_length=600)
+    missing_proof: list[str] = Field(default_factory=list, max_length=12)
+    source_diversity: list[ResumeRetrievalSourceKind] = Field(
+        default_factory=list, max_length=10
+    )
+
+
+class ResumeRetrievalSourceStatus(ContractModel):
+    source_kind: ResumeRetrievalSourceKind
+    state: Literal["SEARCHED", "EMPTY", "UNAVAILABLE", "NOT_SELECTED"]
+    detail: str | None = None
+    candidate_count: int = Field(default=0, ge=0)
+
+
+class ResumeEvidenceCoverageMap(ContractModel):
+    """Structured evidence coverage over one job description."""
+
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    requirements: list[ResumeRequirementExpansion] = Field(max_length=24)
+    coverage: list[ResumeRetrievalCoverage] = Field(max_length=24)
+    candidates: list[ResumeRetrievalCandidate] = Field(max_length=1200)
+    sources: list[ResumeRetrievalSourceStatus] = Field(max_length=10)
+    retrieved_count: int = Field(ge=0)
+    kept_count: int = Field(ge=0)
+    irrelevant_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_coverage_identity(self) -> ResumeEvidenceCoverageMap:
+        requirement_ids = [item.requirement_id for item in self.requirements]
+        if len(requirement_ids) != len(set(requirement_ids)):
+            raise ValueError("requirement identities must be unique")
+        coverage_ids = [item.requirement_id for item in self.coverage]
+        if coverage_ids != requirement_ids:
+            raise ValueError("coverage must match normalized requirements in order")
+        candidate_ids = {item.candidate_id for item in self.candidates}
+        referenced = {
+            candidate_id
+            for item in self.coverage
+            for candidate_id in (
+                *item.direct_evidence,
+                *item.semantic_evidence,
+                *item.related_projects,
+                *item.potential_derivations,
+                *item.weak_evidence,
+            )
+        }
+        if not referenced <= candidate_ids:
+            raise ValueError("coverage references an unknown candidate")
+        if len(candidate_ids) != len(self.candidates):
+            raise ValueError("candidate identities must be unique")
+        return self
+
+
+class ClaimClass(StrEnum):
+    """Graded truth for one resume claim. Final export gate is downstream."""
+
+    VERIFIED = "VERIFIED"
+    SUPPORTED_DERIVATION = "SUPPORTED_DERIVATION"
+    HIGH_VALUE_GAP = "HIGH_VALUE_GAP"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class EvidenceAuthority(StrEnum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW_CONTEXTUAL = "LOW_CONTEXTUAL"
+    NON_SUPPORTING = "NON_SUPPORTING"
+
+
+class EvidenceOwnership(StrEnum):
+    PROVEN = "PROVEN"
+    UNPROVEN = "UNPROVEN"
+
+
+class ContaminationKind(StrEnum):
+    NONE = "NONE"
+    JD_QUERY_ECHO = "JD_QUERY_ECHO"
+    COURSE_EXPOSURE = "COURSE_EXPOSURE"
+    MODEL_SUGGESTION = "MODEL_SUGGESTION"
+
+
+class ClaimStrength(StrEnum):
+    STRONG = "STRONG"
+    MODERATE = "MODERATE"
+    BOUNDED = "BOUNDED"
+    CONTRIBUTION_SAFE = "CONTRIBUTION_SAFE"
+    EXPOSURE_SAFE = "EXPOSURE_SAFE"
+    LEARNING_ONLY = "LEARNING_ONLY"
+
+
+class GapAction(StrEnum):
+    SEARCH_MORE = "SEARCH_MORE"
+    USER_SUPPLEMENT = "USER_SUPPLEMENT"
+    LEARNING_CASE = "LEARNING_CASE"
+    IGNORE = "IGNORE"
+
+
+class ClaimValidationCode(StrEnum):
+    UNSUPPORTED_CLASS = "UNSUPPORTED_CLASS"
+    NON_SUPPORTING_EVIDENCE = "NON_SUPPORTING_EVIDENCE"
+    OWNERSHIP_UNPROVEN = "OWNERSHIP_UNPROVEN"
+    TECHNOLOGY_INFLATION = "TECHNOLOGY_INFLATION"
+    NEW_NUMBER = "NEW_NUMBER"
+    ECHO_CONTAMINATION = "ECHO_CONTAMINATION"
+
+
+class GradedEvidence(ContractModel):
+    """Authority/ownership/contamination classification for one retrieved candidate."""
+
+    evidence_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_kind: ResumeRetrievalSourceKind
+    authority: EvidenceAuthority
+    ownership: EvidenceOwnership
+    contamination: ContaminationKind
+    capability_terms: list[str] = Field(default_factory=list, max_length=40)
+    is_implementation: bool = False
+
+
+class ClaimComponentVerdict(ContractModel):
+    """Graded verdict for one capability component of one requirement."""
+
+    component: str = Field(min_length=1, max_length=120)
+    claim_class: ClaimClass
+    evidence_ids: list[str] = Field(default_factory=list, max_length=80)
+    missing_proof: list[str] = Field(default_factory=list, max_length=12)
+    rationale: str = Field(min_length=1, max_length=400)
+
+
+class RequirementClaimMap(ContractModel):
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    requirement_text: str = Field(min_length=1, max_length=2000)
+    capability: str = Field(min_length=1, max_length=120)
+    components: list[ClaimComponentVerdict] = Field(min_length=1, max_length=12)
+
+
+class ApplicationClaim(ContractModel):
+    """One claim allowed into the submit-ready Application Resume."""
+
+    claim_id: str = Field(pattern=r"^CLAIM-\d{2}$")
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    claim_class: ClaimClass
+    strength: ClaimStrength
+    proposed_text: str = Field(min_length=1, max_length=600)
+    evidence_ids: list[str] = Field(min_length=1, max_length=24)
+    authority: EvidenceAuthority
+    ownership: EvidenceOwnership
+    derivation_rationale: str = Field(min_length=1, max_length=400)
+    truth_boundary: str = Field(min_length=1, max_length=400)
+    excluded_implications: list[str] = Field(default_factory=list, max_length=24)
+    technology_vocabulary: list[str] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_application_class(self) -> ApplicationClaim:
+        if self.claim_class not in {
+            ClaimClass.VERIFIED,
+            ClaimClass.SUPPORTED_DERIVATION,
+        }:
+            raise ValueError("Application Resume may contain only VERIFIED or SUPPORTED_DERIVATION")
+        return self
+
+
+class TargetGap(ContractModel):
+    """One clearly labeled non-submit-safe item in the Target Resume."""
+
+    gap_id: str = Field(pattern=r"^GAP-\d{2}$")
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    capability: str = Field(min_length=1, max_length=120)
+    claim_class: ClaimClass
+    suggested_wording: str = Field(min_length=1, max_length=600)
+    why_it_matters: str = Field(min_length=1, max_length=400)
+    evidence_found: list[str] = Field(default_factory=list, max_length=24)
+    missing_proof: list[str] = Field(min_length=1, max_length=12)
+    actions: list[GapAction] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_target_class(self) -> TargetGap:
+        if self.claim_class not in {
+            ClaimClass.HIGH_VALUE_GAP,
+            ClaimClass.UNSUPPORTED,
+        }:
+            raise ValueError("target gaps must be HIGH_VALUE_GAP or UNSUPPORTED")
+        return self
+
+
+class ClaimTruthResult(ContractModel):
+    """Graded claim map plus Application/Target separation for one JD."""
+
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    requirement_maps: list[RequirementClaimMap] = Field(max_length=24)
+    evidence: list[GradedEvidence] = Field(default_factory=list, max_length=1200)
+    application_claims: list[ApplicationClaim] = Field(max_length=80)
+    target_gaps: list[TargetGap] = Field(max_length=80)
+    verified_count: int = Field(ge=0)
+    supported_derivation_count: int = Field(ge=0)
+    high_value_gap_count: int = Field(ge=0)
+    unsupported_count: int = Field(ge=0)
+    contamination_counts: dict[ContaminationKind, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_claim_identity(self) -> ClaimTruthResult:
+        requirement_ids = [item.requirement_id for item in self.requirement_maps]
+        if len(requirement_ids) != len(set(requirement_ids)):
+            raise ValueError("requirement claim maps must be unique")
+        evidence_ids = {item.evidence_id for item in self.evidence}
+        application_ids = [item.claim_id for item in self.application_claims]
+        gap_ids = [item.gap_id for item in self.target_gaps]
+        if len(application_ids) != len(set(application_ids)):
+            raise ValueError("application claim ids must be unique")
+        if len(gap_ids) != len(set(gap_ids)):
+            raise ValueError("target gap ids must be unique")
+        for claim in self.application_claims:
+            if not set(claim.evidence_ids) <= evidence_ids:
+                raise ValueError("application claim references unknown evidence")
+        if any(count < 0 for count in self.contamination_counts.values()):
+            raise ValueError("contamination counts must be non-negative")
+        return self
+
+
+class ContributionMode(StrEnum):
+    """How engineering contribution was made; independent of claim truth."""
+
+    USER_DIRECT = "user_direct"
+    AI_ASSISTED_USER_DIRECTED = "ai_assisted_user_directed"
+    AGENT_GENERATED_USER_REVIEWED = "agent_generated_user_reviewed"
+    EXTERNAL_UNKNOWN = "external_unknown"
+
+
+class ResumeRoleStrategy(ContractModel):
+    """JD-conditioned positioning derived from the graded claim map."""
+
+    role_title: str = Field(min_length=1, max_length=200)
+    positioning: str = Field(min_length=1, max_length=500)
+    headline: str = Field(min_length=1, max_length=240)
+    prioritized_requirement_ids: list[str] = Field(min_length=1, max_length=24)
+    emphasized_terms: list[str] = Field(min_length=1, max_length=40)
+    unsupported_terms: list[str] = Field(default_factory=list, max_length=40)
+    selected_projects: list[str] = Field(default_factory=list, max_length=12)
+    claim_allocations: dict[str, list[str]] = Field(default_factory=dict)
+    recruiter_scan_priorities: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ResumeGenerationContract(ContractModel):
+    """Bounded generation context. The model may rephrase, never expand truth."""
+
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    role_strategy: ResumeRoleStrategy
+    allowed_claims: list[ApplicationClaim] = Field(default_factory=list, max_length=24)
+    skills: list[str] = Field(default_factory=list, max_length=48)
+    projects: list[str] = Field(default_factory=list, max_length=12)
+    excluded_implications: list[str] = Field(default_factory=list, max_length=40)
+    required_sections: list[str] = Field(default_factory=list, max_length=6)
+    model_rules: list[str] = Field(default_factory=list, max_length=12)
+
+
+class GeneratedResumeBullet(ContractModel):
+    """One generated bullet that retains its authorized claim provenance."""
+
+    bullet_id: str = Field(pattern=r"^BULLET-\d{2}$")
+    section: Literal["EXPERIENCE", "PROJECTS", "INDEPENDENT_ENGINEERING", "EDUCATION"]
+    text: str = Field(min_length=1, max_length=600)
+    source_claim_ids: list[str] = Field(min_length=1, max_length=8)
+    project_identity: str | None = Field(default=None, max_length=240)
+    contribution_mode: ContributionMode
+    generation_status: Literal["MODEL_GENERATED", "DETERMINISTIC_REPAIR"] = (
+        "MODEL_GENERATED"
+    )
+    truth_boundary: str = Field(min_length=1, max_length=400)
+
+
+class ApplicationResumeDraft(ContractModel):
+    """Structured Application Resume draft; provenance never reaches public output."""
+
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    headline: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1, max_length=800)
+    skills: list[str] = Field(min_length=1, max_length=48)
+    bullets: list[GeneratedResumeBullet] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_bullet_identity(self) -> ApplicationResumeDraft:
+        bullet_ids = [item.bullet_id for item in self.bullets]
+        if len(bullet_ids) != len(set(bullet_ids)):
+            raise ValueError("generated bullet ids must be unique")
+        return self
+
+
+class GenerationViolationCode(StrEnum):
+    UNAUTHORIZED_TECHNOLOGY = "unauthorized_technology"
+    INVENTED_METRIC = "invented_metric"
+    INVENTED_OUTCOME = "invented_outcome"
+    OWNERSHIP_INFLATION = "ownership_inflation"
+    SCALE_INFLATION = "scale_inflation"
+    DEPLOYMENT_INFLATION = "deployment_inflation"
+    WEAKENED_CLAIM = "weakened_claim"
+    UNKNOWN_SOURCE_CLAIM = "unknown_source_claim"
+    CONTRIBUTION_MODE_INFLATION = "contribution_mode_inflation"
+
+
+class GenerationViolation(ContractModel):
+    bullet_id: str | None = Field(default=None, pattern=r"^BULLET-\d{2}$")
+    field_name: Literal["headline", "summary"] | None = None
+    rule_code: GenerationViolationCode
+    detail: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> GenerationViolation:
+        if (self.bullet_id is None) == (self.field_name is None):
+            raise ValueError("generation violation must identify one bullet or document field")
+        return self
+
+
+class ValidationReport(ContractModel):
+    checked_count: int = Field(ge=0)
+    violations: list[GenerationViolation] = Field(default_factory=list, max_length=80)
+    repaired_count: int = Field(ge=0)
+    rejected_count: int = Field(ge=0)
+    rejected_skills: list[str] = Field(default_factory=list, max_length=48)
+    valid: bool
+    post_editorial_validated: bool = False
+
+
+class CoverageSummary(ContractModel):
+    requirement_id: str = Field(pattern=r"^REQ-\d{2}$")
+    status: Literal[
+        "STRONGLY_REPRESENTED",
+        "PARTIALLY_REPRESENTED",
+        "AVAILABLE_BUT_NOT_SELECTED",
+        "HIGH_VALUE_GAP",
+        "UNSUPPORTED",
+    ]
+    detail: str = Field(min_length=1, max_length=400)
+
+
+class CoverageReport(ContractModel):
+    requirements_total: int = Field(ge=0)
+    strongly_represented: list[str] = Field(default_factory=list, max_length=24)
+    partially_represented: list[str] = Field(default_factory=list, max_length=24)
+    available_not_selected: list[str] = Field(default_factory=list, max_length=24)
+    high_value_gaps: list[str] = Field(default_factory=list, max_length=24)
+    unsupported: list[str] = Field(default_factory=list, max_length=24)
+    summaries: list[CoverageSummary] = Field(default_factory=list, max_length=24)
+
+    @model_validator(mode="after")
+    def validate_full_accounting(self) -> CoverageReport:
+        accounted = (
+            len(self.strongly_represented)
+            + len(self.partially_represented)
+            + len(self.available_not_selected)
+            + len(self.high_value_gaps)
+            + len(self.unsupported)
+        )
+        if accounted != self.requirements_total:
+            raise ValueError("coverage must account for every requirement exactly once")
+        return self
+
+
+class ResumeQualityReview(ContractModel):
+    """Structured human-readable quality review; never expands truth."""
+
+    truth: int = Field(ge=1, le=5)
+    role_fit: int = Field(ge=1, le=5)
+    specificity: int = Field(ge=1, le=5)
+    differentiation: int = Field(ge=1, le=5)
+    scanability: int = Field(ge=1, le=5)
+    natural_language: int = Field(ge=1, le=5)
+    redundancy: int = Field(ge=1, le=5)
+    evidence_utilization: int = Field(ge=1, le=5)
+    strengths: list[str] = Field(default_factory=list, max_length=12)
+    weaknesses: list[str] = Field(default_factory=list, max_length=12)
+
+
+class GenerationPreflight(ContractModel):
+    """Exact intended paid-call preflight; never performs the call itself."""
+
+    provider: str = Field(min_length=1, max_length=120)
+    model: str = Field(min_length=1, max_length=120)
+    reasoning_effort: str = Field(min_length=1, max_length=40)
+    thinking_enabled: bool
+    credential_status: Literal["CONFIGURED", "NOT_CONFIGURED"]
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    requirements_total: int = Field(ge=0)
+    allowed_claim_ids: list[str] = Field(default_factory=list, max_length=24)
+    selected_projects: list[str] = Field(default_factory=list, max_length=12)
+    excluded_terms: list[str] = Field(default_factory=list, max_length=40)
+    estimated_stage: str = Field(min_length=1, max_length=120)
+    intended_calls: int = Field(default=1, ge=0, le=1)
+    automatic_retries: int = Field(default=0, ge=0, le=0)
+
+
+class GenerationReceipt(ContractModel):
+    provider: str = Field(min_length=1, max_length=120)
+    model: str = Field(min_length=1, max_length=120)
+    reasoning_effort: str = Field(min_length=1, max_length=40)
+    thinking_enabled: bool
+    model_calls: int = Field(ge=0)
+    latency_ms: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cache_tokens: int | None = Field(default=None, ge=0)
+    status: Literal["SUCCEEDED", "FAILED", "NOT_EXECUTED"]
+    error_category: str | None = None
+    real_call: bool = False
+
+
+class ResumeGenerationResult(ContractModel):
+    job_description_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    role_strategy: ResumeRoleStrategy
+    application_draft: ApplicationResumeDraft
+    coverage_report: CoverageReport
+    validation_report: ValidationReport
+    generation_receipt: GenerationReceipt
+    target_gaps: list[TargetGap] = Field(default_factory=list, max_length=80)

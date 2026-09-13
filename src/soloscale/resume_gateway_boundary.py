@@ -31,6 +31,9 @@ from soloscale.resume_evidence_pack import (
     build_jd_positioning_brief,
 )
 from soloscale.resume_models import (
+    MAX_RESUME_ATOMIC_FACTS,
+    MAX_RESUME_PROFILE_ENTRIES,
+    PROFILE_ENTRY_ID_PATTERN,
     CandidateEvidencePack,
     CandidateProfile,
     CompositionEvidencePlan,
@@ -38,6 +41,7 @@ from soloscale.resume_models import (
     ResumeAtomicFact,
     RoleStrategy,
     build_resume_atomic_facts,
+    validate_resume_profile_entry_count,
 )
 
 MAX_RESUME_FILE_BYTES = 5 * 1024 * 1024
@@ -101,7 +105,7 @@ _CHINESE_ADDRESS_RE = re.compile(
     r"[\u4e00-\u9fff0-9]{2,40}(?:省|市|区|县|镇|乡|街道|路|街|巷)"
     r"[\u4e00-\u9fff0-9号室栋单元-]{1,50}"
 )
-_PRIVATE_TOKEN_RE = re.compile(r"__SS_PRIVATE_[A-Z]+_\d{2}__")
+_PRIVATE_TOKEN_RE = re.compile(r"__SS_PRIVATE_[A-Z]+_\d{2,}__")
 _BULLET_PREFIX_RE = re.compile(r"^(?:[-*\u2022]|\d+[.)])\s+")
 _SAFE_STYLE_IDS = {
     "bodytext": "BodyText",
@@ -278,15 +282,19 @@ class ExtractedResumeUpload(ContractModel):
 
 
 class GatewayResumeEntry(ContractModel):
-    profile_entry_id: str = Field(pattern=r"^PROFILE-\d{2}$")
+    profile_entry_id: str = Field(pattern=PROFILE_ENTRY_ID_PATTERN)
     text: str = Field(min_length=1, max_length=1_500)
 
 
 class GatewayCandidateProfile(ContractModel):
     summary: str | None = Field(default=None, max_length=4_000)
     skills: list[str] = Field(default_factory=list, max_length=80)
-    entries: list[GatewayResumeEntry] = Field(min_length=1, max_length=80)
-    atomic_facts: list[ResumeAtomicFact] = Field(min_length=1, max_length=960)
+    entries: list[GatewayResumeEntry] = Field(
+        min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES
+    )
+    atomic_facts: list[ResumeAtomicFact] = Field(
+        min_length=1, max_length=MAX_RESUME_ATOMIC_FACTS
+    )
 
 
 class GatewaySupportSummary(ContractModel):
@@ -1161,6 +1169,7 @@ def prepare_resume_gateway_payload(
 ) -> PreparedGatewayPayload:
     """Build the sole typed payload after deterministic direct-identifier removal."""
 
+    validate_resume_profile_entry_count(profile)
     entries = profile.experience_bullets + profile.project_bullets
     if not entries:
         raise ResumeUploadError("The selected resume has no supported experience bullets")

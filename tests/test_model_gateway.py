@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field
 
 from soloscale.evidence_agent import OllamaCallProfile
 from soloscale.model_gateway import (
+    DEEPSEEK_MODEL_IDS,
+    DEEPSEEK_RESPONSES_URL,
+    MODEL_PROVIDER_CATALOG,
+    DeepSeekModelGateway,
+    DeepSeekResponsesHTTPTransport,
+    DeepSeekResponsesRequest,
     GatewayConfigurationState,
     GatewayErrorCategory,
     GatewayTransportScope,
@@ -20,6 +26,7 @@ from soloscale.model_gateway import (
     OllamaModelGateway,
     hosted_gateway_runtime_config,
     model_gateway_for,
+    model_provider_catalog_entry,
 )
 
 
@@ -30,6 +37,14 @@ class _Reply(BaseModel):
 class _StrictSchemaProbe(BaseModel):
     labels: list[str] = Field(json_schema_extra={"uniqueItems": True})
     optional_note: str | None = None
+
+
+class _NestedReply(BaseModel):
+    note: str
+
+
+class _DeepSeekSchemaProbe(BaseModel):
+    nested: _NestedReply | None = None
 
 
 class _ScriptedReasoner:
@@ -56,12 +71,201 @@ def test_unconfigured_external_providers_fail_closed_without_fallback(
     for provider in (
         ModelProviderId.SOLOSCALE_HOSTED,
         ModelProviderId.OPENAI_COMPATIBLE,
+        ModelProviderId.DEEPSEEK,
     ):
         gateway = model_gateway_for(provider)
         assert gateway.descriptor.configuration_state is GatewayConfigurationState.NOT_CONFIGURED
         assert gateway.descriptor.transport_scope is GatewayTransportScope.EXTERNAL
         with pytest.raises(ModelGatewayNotConfigured):
             gateway.complete(_Reply, system="system", user="user")
+
+
+def test_provider_catalog_and_factory_keep_deepseek_identity_explicit() -> None:
+    assert [entry.provider for entry in MODEL_PROVIDER_CATALOG] == [
+        ModelProviderId.OLLAMA,
+        ModelProviderId.SOLOSCALE_HOSTED,
+        ModelProviderId.OPENAI_COMPATIBLE,
+        ModelProviderId.DEEPSEEK,
+    ]
+    entry = model_provider_catalog_entry(ModelProviderId.DEEPSEEK)
+    assert entry.settings_path == "/settings/ai/deepseek"
+    assert entry.default_model == "deepseek-v4-flash"
+    unconfigured = model_gateway_for(
+        ModelProviderId.DEEPSEEK,
+        model="deepseek-v4-pro",
+    )
+    assert unconfigured.descriptor.provider is ModelProviderId.DEEPSEEK
+    assert unconfigured.descriptor.model == "deepseek-v4-pro"
+    assert unconfigured.descriptor.base_url == DEEPSEEK_RESPONSES_URL
+    assert not isinstance(unconfigured, OllamaModelGateway)
+    with pytest.raises(ModelGatewayNotConfigured):
+        unconfigured.complete(_Reply, system="system", user="user")
+    with pytest.raises(ValueError, match="DeepSeek model"):
+        model_gateway_for(
+            ModelProviderId.DEEPSEEK,
+            model="invented-model",
+            deepseek_api_key="synthetic-key",
+        )
+
+
+def test_deepseek_gateway_uses_selected_model_and_real_reasoning_mapping() -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.requests: list[DeepSeekResponsesRequest] = []
+
+        def send(self, request: DeepSeekResponsesRequest) -> str:
+            self.requests.append(request)
+            return '```json\n{"value":"grounded"}\n```'
+
+    transport = Transport()
+    gateway = model_gateway_for(
+        ModelProviderId.DEEPSEEK,
+        model=DEEPSEEK_MODEL_IDS[1],
+        deepseek_api_key="synthetic-key",
+        deepseek_reasoning_effort="max",
+        deepseek_transport=transport,
+    )
+
+    assert isinstance(gateway, DeepSeekModelGateway)
+    assert gateway.descriptor.provider is ModelProviderId.DEEPSEEK
+    assert gateway.complete(_Reply, system="system", user="user") == _Reply(
+        value="grounded"
+    )
+    assert len(transport.requests) == 1
+    request = transport.requests[0]
+    assert request.endpoint == DEEPSEEK_RESPONSES_URL
+    assert request.model == "deepseek-v4-pro"
+    assert request.reasoning_effort == "max"
+    assert request.max_output_tokens == 16_384
+    assert gateway.last_call_profile is not None
+    assert gateway.last_call_profile.provider is ModelProviderId.DEEPSEEK
+    assert gateway.last_call_profile.model == "deepseek-v4-pro"
+    assert gateway.last_call_profile.reasoning_effort == "max"
+
+
+def test_deepseek_gateway_sanitizes_unexpected_transport_failures() -> None:
+    class Transport:
+        def send(self, request: DeepSeekResponsesRequest) -> str:
+            del request
+            raise RuntimeError("secret-upstream-detail")
+
+    gateway = model_gateway_for(
+        ModelProviderId.DEEPSEEK,
+        model="deepseek-v4-flash",
+        deepseek_api_key="synthetic-key",
+        deepseek_transport=Transport(),
+    )
+    assert isinstance(gateway, DeepSeekModelGateway)
+
+    with pytest.raises(ModelGatewayTransportError) as raised:
+        gateway.complete(_Reply, system="system", user="user")
+
+    assert str(raised.value) == "DeepSeek request failed"
+    assert "secret-upstream-detail" not in str(raised.value)
+    assert gateway.last_call_profile is not None
+    assert gateway.last_call_profile.provider is ModelProviderId.DEEPSEEK
+
+
+def test_deepseek_http_transport_wires_responses_reasoning_without_secret_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    secret = "synthetic-deepseek-key"
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, maximum: int) -> bytes:
+            captured["maximum"] = maximum
+            return (
+                b'{"output":['
+                b'{"type":"reasoning","content":['
+                b'{"type":"reasoning_text","text":"not structured JSON"}]},'
+                b'{"type":"message","content":['
+                b'{"type":"output_text","text":"{\\"value\\":\\"grounded\\"}"}]}'
+                b"]}"
+            )
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int) -> Response:
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        assert isinstance(request.data, bytes)
+        captured["body"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    transport = DeepSeekResponsesHTTPTransport(secret)
+    request = DeepSeekResponsesRequest(
+        correlation_id=f"gateway-{'a' * 24}",
+        model="deepseek-v4-flash",
+        system="system",
+        user="user",
+        response_json_schema=_Reply.model_json_schema(),
+        reasoning_effort="none",
+        timeout_seconds=8,
+    )
+
+    assert transport.send(request) == '{"value":"grounded"}'
+    assert captured["url"] == DEEPSEEK_RESPONSES_URL
+    assert captured["authorization"] == f"Bearer {secret}"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["model"] == "deepseek-v4-flash"
+    assert body["reasoning"] == {"effort": "none"}
+    assert body["text"]["format"]["type"] == "json_schema"
+    assert secret not in json.dumps(body)
+
+
+def test_deepseek_transport_adds_explicit_type_to_nullable_any_of(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, maximum: int) -> bytes:
+            del maximum
+            return b'{"output_text":"{\\"nested\\":{\\"note\\":\\"grounded\\"}}"}'
+
+    def fake_urlopen(request: urllib.request.Request, timeout: int) -> Response:
+        del timeout
+        assert isinstance(request.data, bytes)
+        captured["body"] = json.loads(request.data)
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    canonical_schema = _DeepSeekSchemaProbe.model_json_schema()
+    transport = DeepSeekResponsesHTTPTransport("synthetic-deepseek-key")
+    request = DeepSeekResponsesRequest(
+        correlation_id=f"gateway-{'b' * 24}",
+        model="deepseek-v4-pro",
+        system="system",
+        user="user",
+        response_json_schema=canonical_schema,
+        reasoning_effort="low",
+        timeout_seconds=8,
+    )
+
+    assert transport.send(request) == '{"nested":{"note":"grounded"}}'
+    assert "type" not in canonical_schema["properties"]["nested"]
+    body = captured["body"]
+    assert isinstance(body, dict)
+    wire_schema = body["text"]["format"]["schema"]
+    assert wire_schema["properties"]["nested"]["type"] == "object"
+    assert "anyOf" not in wire_schema["properties"]["nested"]
+    assert wire_schema["properties"]["nested"]["properties"] == {
+        "note": {"title": "Note", "type": "string"}
+    }
 
 
 def test_optional_ollama_gateway_delegates_only_to_the_supplied_reasoner() -> None:

@@ -27,8 +27,10 @@ from soloscale.resume_gateway_boundary import (
     validate_role_strategy_placeholders,
 )
 from soloscale.resume_models import (
+    MAX_RESUME_PROFILE_ENTRIES,
     CandidateProfile,
     GroundedResumeBulletRewrite,
+    ResumeProfileLimitError,
     RoleStrategy,
 )
 
@@ -47,7 +49,7 @@ def _selected(
 
 
 def _plain_resume() -> str:
-    return """Lang Ju
+    return """Example Candidate
 AI Engineer
 SUMMARY
 Evidence-grounded AI engineer.
@@ -222,14 +224,14 @@ def test_text_docx_normalization_removes_invalid_xml_characters() -> None:
 
 def test_gateway_payload_removes_identifiers_and_has_strict_metadata_allowlist() -> None:
     profile = CandidateProfile(
-        full_name="Lang Ju",
+        full_name="Example Candidate",
         summary=(
-            "Lang Ju · lang@example.com · +1 (415) 555-0199 · "
-            "123 Main Street, San Francisco, CA · /Users/ju.l/private/resume.md"
+            "Example Candidate · candidate@example.com · +1 (415) 555-0199 · "
+            "123 Main Street, San Francisco, CA · /Users/example/private/resume.md"
         ),
         skills=["Python, RAG, agents"],
         experience_bullets=[
-            "Lang Ju delivered AI workflows; portfolio https://github.com/langju/private."
+            "Example Candidate delivered AI workflows; portfolio https://github.com/example-candidate/private."
         ],
         project_bullets=["Built grounded RAG and agent workflows."],
     )
@@ -248,8 +250,8 @@ def test_gateway_payload_removes_identifiers_and_has_strict_metadata_allowlist()
             source_format="docx",
             section_order=["SUMMARY", "WORK EXPERIENCE"],
             heading_names=["SUMMARY", "WORK EXPERIENCE"],
-            style_ids=["Heading1", "LangJuPrivate"],
-            font_families=["Aptos", "Lang Ju"],
+            style_ids=["Heading1", "ExamplePrivate"],
+            font_families=["Aptos", "Example Candidate"],
             colors=["223344"],
         ),
         support_upload=support,
@@ -257,12 +259,12 @@ def test_gateway_payload_removes_identifiers_and_has_strict_metadata_allowlist()
     )
     serialized = prepared.payload.model_dump_json()
     for private_value in (
-        "Lang Ju",
-        "lang@example.com",
+        "Example Candidate",
+        "candidate@example.com",
         "+1 (415) 555-0199",
         "123 Main Street",
-        "/Users/ju.l",
-        "https://github.com/langju/private",
+        "/Users/example",
+        "https://github.com/example-candidate/private",
     ):
         assert private_value not in serialized
     assert "__SS_PRIVATE_" in serialized
@@ -328,8 +330,8 @@ def test_gateway_payload_removes_identifiers_and_has_strict_metadata_allowlist()
     )
     validate_role_strategy_placeholders(strategy, prepared)
     restored = restore_role_strategy(strategy, prepared.private_replacements)
-    assert "Lang Ju" in restored.bullet_rewrites[0].text
-    assert "https://github.com/langju/private" in restored.bullet_rewrites[0].text
+    assert "Example Candidate" in restored.bullet_rewrites[0].text
+    assert "https://github.com/example-candidate/private" in restored.bullet_rewrites[0].text
     malformed_payload = strategy.model_dump(mode="json")
     malformed_payload["bullet_rewrites"][0]["text"] += (
         " __SS_PRIVATE_UNKNOWN_99__"
@@ -337,6 +339,51 @@ def test_gateway_payload_removes_identifiers_and_has_strict_metadata_allowlist()
     with pytest.raises(ResumeUploadError, match="unknown private placeholder"):
         validate_role_strategy_placeholders(
             RoleStrategy.model_validate(malformed_payload), prepared
+        )
+
+
+def test_gateway_payload_accepts_three_digit_profile_entry_ids() -> None:
+    bullets = [
+        f"Delivered verified resume result {index}."
+        for index in range(1, 101)
+    ]
+
+    prepared = prepare_resume_gateway_payload(
+        profile=CandidateProfile(experience_bullets=bullets),
+        job_description="Deliver reliable resume systems.",
+        tailoring_instructions="Preserve every approved result.",
+        template_metadata=ResumeTemplateMetadata(source_format="docx"),
+        request_id="resume-request-" + "c" * 24,
+    )
+
+    assert len(prepared.payload.candidate_profile.entries) == 100
+    assert prepared.payload.candidate_profile.entries[-1].profile_entry_id == (
+        "PROFILE-100"
+    )
+    assert any(
+        fact.fact_id == "FACT-PROFILE-100-01"
+        for fact in prepared.payload.candidate_profile.atomic_facts
+    )
+
+
+def test_gateway_payload_rejects_profiles_above_the_bounded_entry_limit() -> None:
+    bullets = [
+        f"Delivered verified resume result {index}."
+        for index in range(1, MAX_RESUME_PROFILE_ENTRIES + 2)
+    ]
+
+    with pytest.raises(
+        ResumeProfileLimitError,
+        match=(
+            rf"at most {MAX_RESUME_PROFILE_ENTRIES} .* contains "
+            rf"{MAX_RESUME_PROFILE_ENTRIES + 1}"
+        ),
+    ):
+        prepare_resume_gateway_payload(
+            profile=CandidateProfile(experience_bullets=bullets),
+            job_description="Deliver reliable resume systems.",
+            tailoring_instructions="Preserve every approved result.",
+            template_metadata=ResumeTemplateMetadata(source_format="docx"),
         )
 
 

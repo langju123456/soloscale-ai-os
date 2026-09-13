@@ -19,7 +19,7 @@
 | RAG / evidence | Local SQLite + FTS knowledge index, bounded retrieval, evidence citations, hash lineage, and claim validation |
 | Structured AI outputs | Pydantic-validated model contracts keep generated candidates separate from verified facts and approved outputs |
 | Evaluation | Synthetic retrieval/context gates plus citation-lineage, schema, packaging, and deterministic acceptance checks |
-| Provider routing | Local Ollama, an explicit OpenAI-compatible path, a hosted gateway, and optional local MLX—with no implicit provider fallback |
+| Provider routing | Local Ollama, explicit OpenAI-compatible and DeepSeek structured-output paths, a hosted gateway, and optional local MLX—with no implicit provider fallback |
 | Human-in-the-loop AI | Public, paid, destructive, credential, and irreversible actions remain explicitly gated |
 | Developer tooling | Python package, CLI, local web UI, versioned Skills, receipts, and inspectable run artifacts |
 | Productization | Optional native macOS desktop app and Remotion / TypeScript video-rendering surfaces |
@@ -90,6 +90,14 @@ A job description plus an operator-supplied candidate profile can produce:
 
 Candidate facts remain separate from retrieval candidates.
 
+The current `/resume/intelligence` route is a local **preflight candidate**: it
+analyzes the JD, retrieves only the evidence sources selected for that run, grades
+claim truth, and prepares a generation contract without making a provider call.
+Private Codex/ChatGPT and BuildLog history are excluded by default. The existing
+`/resume` route remains the active generation/export path; connecting the candidate
+generator and recovering from provider length/schema failures are separate follow-up
+work, not completed capabilities in this revision.
+
 ### Engineering Learning
 
 Resolved engineering work can become structured interview practice through:
@@ -159,6 +167,7 @@ State transitions, retry budgets, timeouts, approvals, validation, and completio
 * Ollama
 * MLX
 * configurable OpenAI-compatible endpoints
+* DeepSeek structured outputs
 * hosted provider gateway
 * structured model outputs
 

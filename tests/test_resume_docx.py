@@ -13,6 +13,13 @@ from pydantic import ValidationError
 from soloscale.content_canon import StoryReadiness, load_month_one_canon
 from soloscale.evidence_hub import EvidenceHub, EvidenceHubError
 from soloscale.knowledge_models import ContentRole, RetrievalHit, SourceKind
+from soloscale.local_ui import _build_resume_provenance_receipt
+from soloscale.model_gateway import (
+    GatewayConfigurationState,
+    GatewayDescriptor,
+    GatewayTransportScope,
+    ModelProviderId,
+)
 from soloscale.resume_docx import (
     ResumeTemplateError,
     ResumeValidationRuleCode,
@@ -20,10 +27,12 @@ from soloscale.resume_docx import (
     _remove_trailing_empty_paragraphs,
     _select_safe_rewrites,
     _validate_role_strategy,
+    apply_resume_expert_review,
     apply_resume_template_structure,
     extract_candidate_profile,
     read_template_paragraphs,
     tailor_resume_docx,
+    tailor_resume_docx_with_gateway,
 )
 from soloscale.resume_evidence_pack import (
     _compact_verified_facts,
@@ -39,6 +48,7 @@ from soloscale.resume_models import (
     ResumeAtomicFact,
     ResumeClaimProvenance,
     ResumeClaimVerificationStatus,
+    ResumeExpertReviewResult,
     RoleStrategy,
     build_resume_atomic_facts,
 )
@@ -129,6 +139,258 @@ def _template_docx() -> bytes:
         archive.writestr("word/styles.xml", b"styles-preserve-exactly")
         archive.writestr("word/numbering.xml", b"numbering-preserve-exactly")
     return target.getvalue()
+
+
+def _duplicate_claim_template_docx() -> bytes:
+    repeated = "Built Python evidence service."
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("SUMMARY"),
+        _paragraph("Evidence-grounded engineer."),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("Search Project"),
+        _paragraph(repeated, bullet=True),
+        _paragraph("Platform Project"),
+        _paragraph(repeated, bullet=True),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python, RAG", bullet=True),
+        _paragraph("Python, RAG", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("Example Company"),
+        _paragraph(repeated, bullet=True),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def _large_profile_template_docx(bullet_count: int = 100) -> bytes:
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("SUMMARY"),
+        _paragraph("Evidence-grounded engineer."),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("Example Company"),
+        *[
+            _paragraph(f"Delivered verified resume result {index}.", bullet=True)
+            for index in range(1, bullet_count + 1)
+        ],
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def test_ai_tailoring_accepts_duplicate_claim_and_skill_text_by_position() -> None:
+    template = _duplicate_claim_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02", "PROFILE-03"]
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Build Python evidence services.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01", "SKILL-02"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "SYNTHESIS",
+                            "text": profile.experience_bullets[0]
+                            if entry_id == "PROFILE-01"
+                            else profile.project_bullets[0],
+                            "source_fact_ids": [_fact_ids(profile, entry_id)[0]],
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve each positional claim.",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "Build Python evidence services.",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+
+    duplicate_bullets = [
+        paragraph
+        for paragraph in read_template_paragraphs(tailored.content)
+        if paragraph.is_bullet and paragraph.text == "Built Python evidence service."
+    ]
+    assert len(duplicate_bullets) == 3
+    assert tailored.rendered_profile_entry_ids == tuple(entry_ids)
+    assert tailored.role_strategy is not None
+    assert [
+        rewrite.profile_entry_id for rewrite in tailored.role_strategy.bullet_rewrites
+    ] == entry_ids
+    assert {
+        rewrite.kind for rewrite in tailored.role_strategy.bullet_rewrites
+    } == {"REWRITE"}
+
+    source_text = profile.project_bullets[0]
+    reviewed = apply_resume_expert_review(
+        tailored,
+        profile=profile,
+        job_description="Build Python evidence services.",
+        review=ResumeExpertReviewResult.model_validate(
+            {
+                "summary": "Tighten one positional project claim.",
+                "patches": [
+                    {
+                        "profile_entry_id": "PROFILE-02",
+                        "before_sha256": hashlib.sha256(
+                            source_text.encode("utf-8")
+                        ).hexdigest(),
+                        "after": "Built an evidence service with Python.",
+                        "new_factual_claims": [],
+                        "rationale": "Improve clarity without changing facts.",
+                    }
+                ],
+                "omitted_high_value_profile_entry_ids": [],
+            }
+        ),
+        expert_provider="test",
+        expert_model="test-model",
+    )
+    visible = [paragraph.text for paragraph in read_template_paragraphs(reviewed.content)]
+    assert visible[visible.index("Search Project") + 1] == (
+        "Built an evidence service with Python."
+    )
+    assert visible[visible.index("Platform Project") + 1] == source_text
+    assert visible[visible.index("Example Company") + 1] == source_text
+
+
+def test_expert_review_contract_accepts_every_supported_profile_entry() -> None:
+    review = ResumeExpertReviewResult.model_validate(
+        {
+            "summary": "Review every supported profile entry.",
+            "patches": [
+                {
+                    "profile_entry_id": f"PROFILE-{index:02d}",
+                    "before_sha256": hashlib.sha256(
+                        f"before-{index}".encode()
+                    ).hexdigest(),
+                    "after": f"Evidence-preserving rewrite {index}.",
+                    "new_factual_claims": [],
+                    "rationale": "Improve clarity without changing facts.",
+                }
+                for index in range(1, 121)
+            ],
+            "omitted_high_value_profile_entry_ids": [],
+        }
+    )
+
+    assert len(review.patches) == 120
+    assert review.patches[-1].profile_entry_id == "PROFILE-120"
+
+
+def test_ai_tailoring_preserves_three_digit_profile_identity_and_provenance() -> None:
+    template = _large_profile_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = [f"PROFILE-{index:02d}" for index in range(1, 101)]
+    source_by_id = dict(zip(entry_ids, profile.experience_bullets, strict=True))
+    facts_by_entry: dict[str, list[str]] = {}
+    for fact in build_resume_atomic_facts(profile):
+        facts_by_entry.setdefault(fact.profile_entry_id, []).append(fact.fact_id)
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Deliver reliable resume systems.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": source_by_id[entry_id],
+                            "source_fact_ids": facts_by_entry[entry_id],
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve every approved result.",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "Deliver reliable resume systems.",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    receipt = _build_resume_provenance_receipt(
+        run_id="resume-20260904T000000Z-three-digit",
+        job_description="Deliver reliable resume systems.",
+        profile=profile,
+        tailored=tailored,
+    )
+
+    assert tailored.rendered_profile_entry_ids[-1] == "PROFILE-100"
+    assert tailored.role_strategy is not None
+    assert len(tailored.role_strategy.bullet_rewrites) == 100
+    assert len(receipt.claims) == 101
+    assert receipt.claims[-1].claim_id == "CLAIM-101"
+    assert receipt.claims[-1].profile_entry_id == "PROFILE-100"
 
 
 def test_extract_profile_and_tailor_preserve_every_candidate_claim() -> None:

@@ -12,6 +12,7 @@ import json
 import re
 import time
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -242,6 +243,7 @@ class TailoredDocx:
     model_call_profile: dict[str, object] | None = None
     validation_diagnostics: ResumeValidationDiagnostics | None = None
     role_strategy: RoleStrategy | None = None
+    rendered_profile_entry_ids: tuple[str, ...] = ()
     candidate_evidence_pack: CandidateEvidencePack | None = None
     positioning_brief: JDPositioningBrief | None = None
     evidence_retrieval_trace: ResumeEvidenceRetrievalTrace | None = None
@@ -616,22 +618,70 @@ def _reorder_skill_bullets(
 
 def _profile_entries(profile: CandidateProfile) -> dict[str, str]:
     claims = profile.experience_bullets + profile.project_bullets
-    if len(set(claims)) != len(claims):
-        raise ResumeTemplateError(
-            "AI tailoring requires each approved resume bullet to have unique text"
-        )
     return {f"PROFILE-{index:02d}": text for index, text in enumerate(claims, start=1)}
 
 
 def _profile_skills(profile: CandidateProfile) -> dict[str, str]:
-    if len(set(profile.skills)) != len(profile.skills):
-        raise ResumeTemplateError(
-            "AI tailoring requires each approved skill line to have unique text"
-        )
     return {
         f"SKILL-{index:02d}": text
         for index, text in enumerate(profile.skills, start=1)
     }
+
+
+def _section_bullet_elements(
+    body: ElementTree.Element, heading: str
+) -> list[ElementTree.Element]:
+    children = list(body)
+    bounds = _section_bounds(children, heading)
+    if bounds is None:
+        return []
+    start, end = bounds
+    return [
+        child
+        for child in children[start:end]
+        if child.tag == f"{_W}p" and _is_bullet(child) and _paragraph_text(child)
+    ]
+
+
+def _profile_entry_elements(
+    body: ElementTree.Element, profile: CandidateProfile
+) -> dict[str, ElementTree.Element]:
+    """Bind positional PROFILE identities before any DOCX reordering or rewriting."""
+
+    result: dict[str, ElementTree.Element] = {}
+    next_index = 1
+    for heading, expected_texts in (
+        ("WORK EXPERIENCE", profile.experience_bullets),
+        ("PROJECT HIGHLIGHTS", profile.project_bullets),
+    ):
+        elements = _section_bullet_elements(body, heading)
+        if [_paragraph_text(element) for element in elements] != expected_texts:
+            raise ResumeTemplateError(
+                "Approved profile entries do not map positionally to the DOCX"
+            )
+        for element in elements:
+            result[f"PROFILE-{next_index:02d}"] = element
+            next_index += 1
+    return result
+
+
+def _rendered_profile_entry_ids(
+    body: ElementTree.Element,
+    entry_elements: dict[str, ElementTree.Element],
+) -> tuple[str, ...]:
+    """Record the post-reorder paragraph order for later expert patch application."""
+
+    identity_by_element = {
+        element: entry_id for entry_id, element in entry_elements.items()
+    }
+    rendered = tuple(
+        identity_by_element[element]
+        for heading in ("WORK EXPERIENCE", "PROJECT HIGHLIGHTS")
+        for element in _section_bullet_elements(body, heading)
+    )
+    if len(rendered) != len(entry_elements) or set(rendered) != set(entry_elements):
+        raise ResumeTemplateError("Rendered profile identities do not match the DOCX")
+    return rendered
 
 
 def _exact_priority_validator(
@@ -831,6 +881,12 @@ def _role_strategy_from_exact(
             raise ResumeTemplateError(
                 "AI role strategy referenced an unknown atomic fact"
             ) from error
+        if (
+            body.get("kind") == "SYNTHESIS"
+            and len(fact_ids) == 1
+            and source_ids == [entry_id]
+        ):
+            body["kind"] = "REWRITE"
         body["source_profile_entry_ids"] = source_ids
         rewrites.append({"profile_entry_id": entry_id, **body})
     payload["bullet_rewrites"] = rewrites
@@ -1150,14 +1206,7 @@ def _validate_role_strategy(
         )
         claim_failure_ids.update(expected_ids - set(strategy.evidence_priority))
 
-    expected_skills = set(profile.skills)
-    for index in _duplicate_indices(strategy.skill_priority):
-        reject(
-            ResumeValidationRuleCode.OUTPUT_DUPLICATE,
-            f"$.skill_priority[{index}]",
-            duplicate=True,
-        )
-    if set(strategy.skill_priority) != expected_skills:
+    if Counter(strategy.skill_priority) != Counter(profile.skills):
         reject(
             ResumeValidationRuleCode.OUTPUT_SCHEMA_INVALID,
             "$.skill_priority",
@@ -1608,7 +1657,7 @@ def _build_evidence_adoption_trace(
 def _reorder_project_blocks_by_priority(
     body: ElementTree.Element,
     children: list[ElementTree.Element],
-    priority_by_text: dict[str, int],
+    priority_by_element: dict[ElementTree.Element, int],
 ) -> int:
     bounds = _section_bounds(children, "PROJECT HIGHLIGHTS")
     if bounds is None:
@@ -1635,11 +1684,11 @@ def _reorder_project_blocks_by_priority(
         key=lambda item: (
             min(
                 (
-                    priority_by_text.get(_paragraph_text(child), len(priority_by_text))
+                    priority_by_element.get(child, len(priority_by_element))
                     for child in item[1]
                     if child.tag == f"{_W}p" and _is_bullet(child)
                 ),
-                default=len(priority_by_text),
+                default=len(priority_by_element),
             ),
             item[0],
         ),
@@ -1661,12 +1710,13 @@ def _reorder_skill_bullets_by_priority(
     start, end = bounds
     section = children[start:end]
     bullet_positions = [index for index, child in enumerate(section) if _is_bullet(child)]
-    bullets_by_text = {
-        _paragraph_text(section[index]): section[index] for index in bullet_positions
-    }
-    if set(bullets_by_text) != set(skill_priority):
+    bullets = [section[index] for index in bullet_positions]
+    if Counter(_paragraph_text(bullet) for bullet in bullets) != Counter(skill_priority):
         raise ResumeTemplateError("Approved skill lines do not map cleanly to the DOCX")
-    reordered = [bullets_by_text[text] for text in skill_priority]
+    bullets_by_text: dict[str, list[ElementTree.Element]] = {}
+    for bullet in bullets:
+        bullets_by_text.setdefault(_paragraph_text(bullet), []).append(bullet)
+    reordered = [bullets_by_text[text].pop(0) for text in skill_priority]
     reordered_count = sum(
         section[position] is not bullet
         for position, bullet in zip(bullet_positions, reordered, strict=True)
@@ -1679,12 +1729,24 @@ def _reorder_skill_bullets_by_priority(
     return reordered_count
 
 
-def _replace_bullet_text(
-    body: ElementTree.Element,
-    *,
-    source_text: str,
-    replacement_text: str,
+def _replace_bullet_element_text(
+    paragraph: ElementTree.Element, *, replacement_text: str
 ) -> None:
+    if paragraph.tag != f"{_W}p" or not _is_bullet(paragraph):
+        raise ResumeTemplateError("Approved profile entry is not a DOCX bullet")
+    text_nodes = list(paragraph.iter(f"{_W}t"))
+    if not text_nodes:
+        raise ResumeTemplateError("Approved DOCX bullet has no writable text")
+    text_nodes[0].text = replacement_text
+    for node in text_nodes[1:]:
+        node.text = ""
+
+
+def _replace_bullet_text(
+    body: ElementTree.Element, *, source_text: str, replacement_text: str
+) -> None:
+    """Compatibility fallback for TailoredDocx values without positional identities."""
+
     matches = [
         child
         for child in body
@@ -1692,12 +1754,7 @@ def _replace_bullet_text(
     ]
     if len(matches) != 1:
         raise ResumeTemplateError("Approved profile entry does not map uniquely to the DOCX")
-    text_nodes = list(matches[0].iter(f"{_W}t"))
-    if not text_nodes:
-        raise ResumeTemplateError("Approved DOCX bullet has no writable text")
-    text_nodes[0].text = replacement_text
-    for node in text_nodes[1:]:
-        node.text = ""
+    _replace_bullet_element_text(matches[0], replacement_text=replacement_text)
 
 
 def _replace_summary_text(
@@ -1782,6 +1839,7 @@ def tailor_resume_docx_with_gateway(
     candidate_recorder: Callable[[dict[str, object]], None] | None = None,
     candidate_evidence_pack: CandidateEvidencePack | None = None,
     output_locale: Literal["en-US", "zh-CN"] = "en-US",
+    reasoning_effort: Literal["none", "low"] = "none",
 ) -> TailoredDocx:
     """Use one explicit provider to rank and ground rewrites against approved bullets."""
     if not job_description.strip():
@@ -1882,7 +1940,7 @@ def tailor_resume_docx_with_gateway(
         response_schema,
         system=model_system,
         user=model_user,
-        reasoning_effort="none",
+        reasoning_effort=reasoning_effort,
     )
     strategy = _role_strategy_from_exact(
         exact_strategy,
@@ -1898,7 +1956,10 @@ def tailor_resume_docx_with_gateway(
         "schema_version": "1.0",
         "model_call_count": 1,
         "output_contract": "evidence_backed_resume_composition_v0.1",
-        "reasoning_effort": "none",
+        "provider": gateway.descriptor.provider.value,
+        "model": gateway.descriptor.model,
+        "reasoning_effort": reasoning_effort,
+        "real_call": True,
         "gateway_wall_ms": int((time.perf_counter() - model_started) * 1000),
         "system_chars": len(model_system),
         "user_chars": len(model_user),
@@ -1913,8 +1974,34 @@ def tailor_resume_docx_with_gateway(
     }
     provider_profile = getattr(gateway, "last_call_profile", None)
     if isinstance(provider_profile, ModelCallProfile):
+        token_usage = {
+            key: value
+            for key, value in {
+                "input_tokens": provider_profile.prompt_eval_tokens,
+                "output_tokens": provider_profile.output_tokens,
+            }.items()
+            if value is not None
+        }
+        model_call_profile.update(
+            {
+                "provider": provider_profile.provider.value,
+                "model": provider_profile.model,
+                "reasoning_effort": provider_profile.reasoning_effort,
+                "thinking_enabled": provider_profile.thinking_enabled,
+                "latency_ms": provider_profile.wall_ms,
+                "token_usage": token_usage or None,
+            }
+        )
         model_call_profile["provider_metrics"] = provider_profile.model_dump(
             mode="json"
+        )
+    else:
+        model_call_profile.update(
+            {
+                "thinking_enabled": reasoning_effort != "none",
+                "latency_ms": model_call_profile["gateway_wall_ms"],
+                "token_usage": None,
+            }
         )
     validate_role_strategy_placeholders(strategy, prepared)
     strategy = restore_role_strategy(strategy, prepared.private_replacements)
@@ -1974,17 +2061,23 @@ def tailor_resume_docx_with_gateway(
         )
     members, document = _read_package(template)
     root, body = _parse_document(document)
+    entry_elements = _profile_entry_elements(body, profile)
+    if set(entry_elements) != set(validated_entries):
+        raise ResumeTemplateError("Approved profile identities do not match the DOCX")
     source_paragraphs = [
         _paragraph_text(child) for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ]
     rank_by_id = {entry_id: index for index, entry_id in enumerate(strategy.evidence_priority)}
-    priority_by_text = {
-        validated_entries[entry_id]: rank for entry_id, rank in rank_by_id.items()
+    priority_by_element = {
+        entry_elements[entry_id]: rank for entry_id, rank in rank_by_id.items()
     }
-    project_count = _reorder_project_blocks_by_priority(body, list(body), priority_by_text)
+    project_count = _reorder_project_blocks_by_priority(
+        body, list(body), priority_by_element
+    )
     skill_count = _reorder_skill_bullets_by_priority(
         body, list(body), strategy.skill_priority
     )
+    rendered_profile_entry_ids = _rendered_profile_entry_ids(body, entry_elements)
     summary_rewritten = False
     if strategy.summary_rewrite is not None and profile.summary is not None:
         summary_rewritten = _replace_summary_text(
@@ -2002,11 +2095,9 @@ def tailor_resume_docx_with_gateway(
                 validator_status="selective_pass",
             )
     rewrite_by_id = {item.profile_entry_id: item.text for item in strategy.bullet_rewrites}
-    for entry_id, source_text in validated_entries.items():
-        _replace_bullet_text(
-            body,
-            source_text=source_text,
-            replacement_text=rewrite_by_id[entry_id],
+    for entry_id in validated_entries:
+        _replace_bullet_element_text(
+            entry_elements[entry_id], replacement_text=rewrite_by_id[entry_id]
         )
     _localize_resume_headings(body, output_locale)
     _remove_trailing_empty_paragraphs(body)
@@ -2053,6 +2144,7 @@ def tailor_resume_docx_with_gateway(
         model_call_profile=model_call_profile,
         validation_diagnostics=validation_diagnostics,
         role_strategy=strategy,
+        rendered_profile_entry_ids=rendered_profile_entry_ids,
         candidate_evidence_pack=candidate_evidence_pack,
         positioning_brief=positioning_brief,
         evidence_adoption=evidence_adoption,
@@ -2066,6 +2158,7 @@ def request_resume_expert_review(
     *,
     profile: CandidateProfile,
     gateway: ModelGateway,
+    reasoning_effort: Literal["none", "low"] = "low",
 ) -> ResumeExpertReviewResult:
     """Send only hiring signals, source fragments, and the current draft."""
 
@@ -2125,7 +2218,7 @@ def request_resume_expert_review(
             ensure_ascii=False,
             sort_keys=True,
         ),
-        reasoning_effort="low",
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -2195,12 +2288,33 @@ def apply_resume_expert_review(
     source_paragraph_count = sum(
         1 for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     )
-    for entry_id, patch in patch_by_id.items():
-        _replace_bullet_text(
-            body,
-            source_text=rewrite_by_id[entry_id].text,
-            replacement_text=patch.after,
+    if tailored.rendered_profile_entry_ids:
+        rendered_elements = [
+            element
+            for heading in ("WORK EXPERIENCE", "PROJECT HIGHLIGHTS")
+            for element in _section_bullet_elements(body, heading)
+        ]
+        if len(rendered_elements) != len(tailored.rendered_profile_entry_ids):
+            raise ResumeTemplateError("Expert review cannot map the rendered draft")
+        element_by_entry_id = dict(
+            zip(tailored.rendered_profile_entry_ids, rendered_elements, strict=True)
         )
+        if set(element_by_entry_id) != allowed_ids or any(
+            _paragraph_text(element_by_entry_id[entry_id]) != rewrite.text
+            for entry_id, rewrite in rewrite_by_id.items()
+        ):
+            raise ResumeTemplateError("Expert review cannot map the rendered draft")
+        for entry_id, patch in patch_by_id.items():
+            _replace_bullet_element_text(
+                element_by_entry_id[entry_id], replacement_text=patch.after
+            )
+    else:
+        for entry_id, patch in patch_by_id.items():
+            _replace_bullet_text(
+                body,
+                source_text=rewrite_by_id[entry_id].text,
+                replacement_text=patch.after,
+            )
     if source_paragraph_count != sum(
         1 for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ):
