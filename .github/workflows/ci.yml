@@ -46,6 +46,12 @@ jobs:
       - run: mypy src tests
       - run: pytest -q
       - run: python -m build
+      - name: Build and smoke-test Linux AMD64 container
+        if: matrix.python-version == '3.12'
+        run: |
+          docker build --platform linux/amd64 --file Dockerfile.resume-cloud --tag soloscale-resume-cloud:ci .
+          test "$(docker image inspect soloscale-resume-cloud:ci --format '{{.Architecture}}')" = amd64
+          docker run --rm --no-healthcheck --entrypoint python soloscale-resume-cloud:ci -c 'import os; import soloscale.resume_cloud_api; import soloscale.resume_cloud_worker; assert os.getuid() == 10001; print("AMD64 cloud container imports passed as non-root user")'
 
   deploy_resume_cloud:
     needs: test
