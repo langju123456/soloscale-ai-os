@@ -58,6 +58,34 @@ def _git_dirty() -> str:
     return "true" if _git_output("status", "--porcelain", "--untracked-files=normal") else "false"
 
 
+def _mock_macos_receipt_toolchain(tmp_path: Path) -> Path:
+    toolchain_bin = tmp_path / "macos-toolchain-bin"
+    toolchain_bin.mkdir()
+    uname = toolchain_bin / "uname"
+    uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+    uname.chmod(0o755)
+    plutil = toolchain_bin / "plutil"
+    plutil.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+key = sys.argv[2]
+with open(sys.argv[-1], encoding="utf-8") as stream:
+    value = json.load(stream)[key]
+if isinstance(value, bool):
+    print(str(value).lower())
+elif isinstance(value, str):
+    print(value)
+else:
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    plutil.chmod(0o755)
+    return toolchain_bin
+
+
 def test_build_identity_is_derived_from_the_exact_worktree() -> None:
     identity = _printed_build_identity()
 
@@ -148,6 +176,10 @@ def test_app_build_rejects_a_sidecar_from_a_different_commit(
     script = repository / "scripts" / BUILD_SCRIPT.name
     script.parent.mkdir(parents=True)
     shutil.copy2(BUILD_SCRIPT, script)
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("/usr/bin/plutil", "plutil"),
+        encoding="utf-8",
+    )
     (repository / ".gitignore").write_text("dist/\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
     subprocess.run(
@@ -183,10 +215,14 @@ def test_app_build_rejects_a_sidecar_from_a_different_commit(
         ),
         encoding="utf-8",
     )
+    toolchain_bin = _mock_macos_receipt_toolchain(tmp_path)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{toolchain_bin}{os.pathsep}{environment['PATH']}"
 
     result = subprocess.run(
         ["bash", str(script)],
         cwd=repository,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
