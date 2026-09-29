@@ -1,0 +1,63 @@
+name: Resume cloud immutable image rollout
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/codex/resume-intelligence-public-sync' &&
+      vars.RESUME_CLOUD_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY_URI: ${{ vars.RESUME_CLOUD_ECR_REPOSITORY_URI }}
+      INSTANCE_ID: ${{ vars.RESUME_CLOUD_INSTANCE_ID }}
+      RUN_DOCUMENT: ${{ vars.RESUME_CLOUD_RUN_DOCUMENT }}
+      POSTGRES_IMAGE_URI: ${{ vars.RESUME_CLOUD_POSTGRES_IMAGE_URI }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check reviewed repository variables
+        run: |
+          set -euo pipefail
+          test -n "$ECR_REPOSITORY_URI" && test -n "$INSTANCE_ID" && test -n "$RUN_DOCUMENT" && test -n "$POSTGRES_IMAGE_URI"
+          [[ "$POSTGRES_IMAGE_URI" =~ ^docker\.io/library/postgres@sha256:[a-f0-9]{64}$ ]]
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.RESUME_CLOUD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - id: image
+        name: Reuse or push content-addressed immutable image
+        run: |
+          set -euo pipefail
+          repository="${ECR_REPOSITORY_URI#*/}"
+          tag="content-${{ hashFiles('Dockerfile.resume-cloud', 'Dockerfile.resume-cloud.dockerignore', 'pyproject.toml', 'README.md', 'src/**', '.agents/**', 'scripts/migrate_resume_cloud.py', 'migrations/resume_cloud/**') }}"
+          digest="$(aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            docker buildx build --platform linux/amd64 --file Dockerfile.resume-cloud --tag "$ECR_REPOSITORY_URI:$tag" --push .
+            digest="$(aws ecr describe-images --repository-name "$repository" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)"
+          fi
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'uri=%s@%s\n' "$ECR_REPOSITORY_URI" "$digest" >> "$GITHUB_OUTPUT"
+      - id: command
+        name: Run constrained digest-only SSM document
+        run: |
+          set -euo pipefail
+          command_id="$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name "$RUN_DOCUMENT" --parameters "AppImageUri=${{ steps.image.outputs.uri }},PostgresImageUri=$POSTGRES_IMAGE_URI" --comment "resume-cloud $GITHUB_SHA" --query 'Command.CommandId' --output text)"
+          printf 'id=%s\n' "$command_id" >> "$GITHUB_OUTPUT"
+      - name: Require command success
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            status="$(aws ssm get-command-invocation --command-id '${{ steps.command.outputs.id }}' --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || true)"
+            test "$status" = Success && exit 0
+            case "$status" in Failed|TimedOut|Cancelled|Cancelling) exit 1;; esac
+            sleep 10
+          done
+          exit 1

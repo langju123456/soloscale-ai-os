@@ -6,6 +6,11 @@
 
 > Current package: `0.4.1` · Python `3.11+` · Local-first · Human-controlled
 
+The current operator priority is job-search outcomes: applications, interviews, and offers.
+Learning and building proceed in parallel, while real recruiting feedback chooses the next
+slice. Code existence, personal mastery, and interview ability are separate states; missing
+evidence remains unknown.
+
 **Engineering signals:** agentic workflows · RAG / evidence retrieval · structured model outputs · deterministic validation · provider routing · OAuth integrations · CLI / local UI / macOS · Python quality tooling: pytest · Ruff · mypy
 
 ---
@@ -209,6 +214,22 @@ pip install -e '.[dev]'
 soloscale demo
 python -m soloscale.local_ui
 ```
+
+For the optional loopback-only resume preparation API, install its extra and run:
+
+```bash
+pip install -e '.[api]'
+python -m soloscale.resume_api
+```
+
+It listens on `127.0.0.1:8766` by default and provides a deterministic template-only
+DOCX reorderer. It makes zero model calls and writes no resume data to disk.
+
+For the containerized API and worker with durable PostgreSQL tasks, use the
+[Resume Cloud runbook](docs/engineering/resume-cloud-runbook.md). The
+[ephemeral AWS deployment package](docs/engineering/resume-cloud-aws.md) includes
+infrastructure, scoped deployment access, and cleanup commands. Local container
+checks have passed; a live AWS deployment has not yet been verified.
 
 The local UI opens at:
 

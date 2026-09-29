@@ -1,0 +1,446 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Ephemeral SoloScale Resume demo. One private t3.small host, ECR, SSM, and one-day logs.",
+  "Parameters": {
+    "TaskPrefix": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z][a-z0-9-]{5,35}$"
+    },
+    "ApiTokenParameterName": {
+      "Type": "String",
+      "AllowedPattern": "^/[a-z0-9/-]+$",
+      "NoEcho": true
+    },
+    "PostgresPasswordParameterName": {
+      "Type": "String",
+      "AllowedPattern": "^/[a-z0-9/-]+$",
+      "NoEcho": true
+    },
+    "AmiId": {
+      "Type": "AWS::EC2::Image::Id"
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.44.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "GatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "InternetGatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "RouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "DefaultRoute": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "GatewayAttachment",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "RouteTable"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "PublicSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": "10.44.1.0/24",
+        "MapPublicIpOnLaunch": true,
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "RouteAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "RouteTable"
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet"
+        }
+      }
+    },
+    "SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Zero inbound: SSM port forwarding only",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/soloscale/${TaskPrefix}"
+        },
+        "RetentionInDays": 1,
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "Repository": {
+      "Type": "AWS::ECR::Repository",
+      "Properties": {
+        "RepositoryName": {
+          "Fn::Sub": "${TaskPrefix}/resume-demo"
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true
+        },
+        "EmptyOnDelete": true,
+        "LifecyclePolicy": {
+          "LifecyclePolicyText": "{\"rules\":[{\"rulePriority\":1,\"description\":\"retain five images\",\"selection\":{\"tagStatus\":\"any\",\"countType\":\"imageCountMoreThan\",\"countNumber\":5},\"action\":{\"type\":\"expire\"}}]}"
+        },
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "InstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "minimum-resume-demo-runtime",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Repository",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "ssm:GetParameter",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApiTokenParameterName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PostgresPasswordParameterName}"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "LogGroup",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "InstanceRole"
+          }
+        ]
+      }
+    },
+    "RunDigestDocument": {
+      "Type": "AWS::SSM::Document",
+      "Properties": {
+        "DocumentType": "Command",
+        "DocumentFormat": "JSON",
+        "Name": {
+          "Fn::Sub": "${TaskPrefix}-run-digest"
+        },
+        "Content": {
+          "schemaVersion": "2.2",
+          "parameters": {
+            "AppImageUri": {
+              "type": "String",
+              "allowedPattern": "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9/-]+@sha256:[a-f0-9]{64}$"
+            },
+            "PostgresImageUri": {
+              "type": "String",
+              "allowedPattern": "^docker\\.io/library/postgres@sha256:[a-f0-9]{64}$"
+            }
+          },
+          "mainSteps": [
+            {
+              "action": "aws:runShellScript",
+              "name": "runDigestPinnedContainers",
+              "inputs": {
+                "timeoutSeconds": "900",
+                "runCommand": [
+                  "set -eu",
+                  "umask 077",
+                  "install -d -m 0700 /opt/soloscale/secrets",
+                  {
+                    "Fn::Sub": "aws ssm get-parameter --region ${AWS::Region} --name ${ApiTokenParameterName} --with-decryption --query Parameter.Value --output text > /opt/soloscale/secrets/api_bearer_token"
+                  },
+                  {
+                    "Fn::Sub": "aws ssm get-parameter --region ${AWS::Region} --name ${PostgresPasswordParameterName} --with-decryption --query Parameter.Value --output text > /opt/soloscale/secrets/postgres_password"
+                  },
+                  "cp /opt/soloscale/secrets/postgres_password /opt/soloscale/secrets/postgres_password_app",
+                  "cp /opt/soloscale/secrets/postgres_password /opt/soloscale/secrets/postgres_password_db",
+                  "chown 10001:10001 /opt/soloscale/secrets/api_bearer_token /opt/soloscale/secrets/postgres_password_app",
+                  "chown 70:70 /opt/soloscale/secrets/postgres_password_db",
+                  "chmod 0400 /opt/soloscale/secrets/api_bearer_token /opt/soloscale/secrets/postgres_password_app /opt/soloscale/secrets/postgres_password_db",
+                  "rm -f /opt/soloscale/secrets/postgres_password",
+                  "docker network inspect soloscale-internal >/dev/null 2>&1 || docker network create soloscale-internal",
+                  "docker rm -f resume-api resume-worker resume-db >/dev/null 2>&1 || true",
+                  {
+                    "Fn::Sub": "aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+                  },
+                  "docker pull '{{ AppImageUri }}'",
+                  "docker pull '{{ PostgresImageUri }}'",
+                  "docker volume inspect resume-pgdata >/dev/null 2>&1 || docker volume create resume-pgdata",
+                  "test \"$(docker run --rm --network none --entrypoint id '{{ PostgresImageUri }}' -u postgres)\" = 70",
+                  "docker run --rm --user 0:0 --network none --cap-drop ALL --cap-add CHOWN --security-opt no-new-privileges --entrypoint chown -v resume-pgdata:/var/lib/postgresql/data '{{ PostgresImageUri }}' 70:70 /var/lib/postgresql/data",
+                  "docker run -d --name resume-db --user 70:70 --restart unless-stopped --network soloscale-internal --cap-drop ALL --security-opt no-new-privileges -v resume-pgdata:/var/lib/postgresql/data -v /opt/soloscale/secrets/postgres_password_db:/run/secrets/postgres_password:ro -e POSTGRES_USER=resume_cloud -e POSTGRES_DB=resume_cloud -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password '{{ PostgresImageUri }}'",
+                  "until docker exec resume-db pg_isready -U resume_cloud -d resume_cloud >/dev/null 2>&1; do sleep 2; done",
+                  "docker run --rm --no-healthcheck --network soloscale-internal --cap-drop ALL --security-opt no-new-privileges -v /opt/soloscale/secrets/postgres_password_app:/run/secrets/postgres_password:ro -e RESUME_CLOUD_DATABASE_URL=postgresql://resume_cloud@resume-db/resume_cloud -e PGPASSWORD_FILE=/run/secrets/postgres_password '{{ AppImageUri }}' sh -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); exec python scripts/migrate_resume_cloud.py'",
+                  {
+                    "Fn::Sub": "docker run -d --name resume-api --restart unless-stopped --network soloscale-internal -p 127.0.0.1:8080:8080 --cap-drop ALL --security-opt no-new-privileges --log-driver awslogs --log-opt awslogs-region=${AWS::Region} --log-opt awslogs-group=/soloscale/${TaskPrefix} --log-opt awslogs-stream=api -v /opt/soloscale/secrets/api_bearer_token:/run/secrets/api_bearer_token:ro -v /opt/soloscale/secrets/postgres_password_app:/run/secrets/postgres_password:ro -e RESUME_CLOUD_DATABASE_URL=postgresql://resume_cloud@resume-db/resume_cloud -e RESUME_CLOUD_BEARER_TOKEN_FILE=/run/secrets/api_bearer_token -e PGPASSWORD_FILE=/run/secrets/postgres_password '{{ AppImageUri }}' sh -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); exec python -m soloscale.resume_cloud_api'"
+                  },
+                  {
+                    "Fn::Sub": "docker run -d --name resume-worker --restart unless-stopped --no-healthcheck --network soloscale-internal --cap-drop ALL --security-opt no-new-privileges --log-driver awslogs --log-opt awslogs-region=${AWS::Region} --log-opt awslogs-group=/soloscale/${TaskPrefix} --log-opt awslogs-stream=worker -v /opt/soloscale/secrets/postgres_password_app:/run/secrets/postgres_password:ro -e RESUME_CLOUD_DATABASE_URL=postgresql://resume_cloud@resume-db/resume_cloud -e PGPASSWORD_FILE=/run/secrets/postgres_password '{{ AppImageUri }}' sh -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); exec python -m soloscale.resume_cloud_worker'"
+                  },
+                  "for attempt in $(seq 1 30); do curl --fail --silent http://127.0.0.1:8080/health/live >/dev/null && exit 0; sleep 2; done; exit 1"
+                ]
+              }
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ]
+      }
+    },
+    "Instance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "ImageId": {
+          "Ref": "AmiId"
+        },
+        "InstanceType": "t3.small",
+        "CreditSpecification": {
+          "CPUCredits": "standard"
+        },
+        "IamInstanceProfile": {
+          "Ref": "InstanceProfile"
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "SecurityGroup"
+          }
+        ],
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "MetadataOptions": {
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 1,
+          "HttpEndpoint": "enabled"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "Encrypted": true,
+              "VolumeSize": 20,
+              "VolumeType": "gp3",
+              "DeleteOnTermination": true
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          },
+          {
+            "Key": "soloscale:task",
+            "Value": {
+              "Ref": "TaskPrefix"
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": "#!/bin/bash\nset -eu\nsystemd-run --unit=soloscale-bootstrap-guard --on-active=4h /sbin/shutdown -h now\ndnf -y install docker curl\nsystemctl enable --now docker\ncat >/etc/systemd/system/soloscale-self-terminate.service <<'UNIT'\n[Service]\nType=oneshot\nExecStart=/sbin/shutdown -h now\nUNIT\ncat >/etc/systemd/system/soloscale-self-terminate.timer <<'TIMER'\n[Timer]\nOnBootSec=4h\nUnit=soloscale-self-terminate.service\n[Install]\nWantedBy=timers.target\nTIMER\nsystemctl daemon-reload\nsystemctl enable --now soloscale-self-terminate.timer\n"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "InstanceId": {
+      "Value": {
+        "Ref": "Instance"
+      }
+    },
+    "RepositoryUri": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Repository",
+          "RepositoryUri"
+        ]
+      }
+    },
+    "RunDocumentName": {
+      "Value": {
+        "Ref": "RunDigestDocument"
+      }
+    },
+    "LogGroupName": {
+      "Value": {
+        "Ref": "LogGroup"
+      }
+    }
+  }
+}
