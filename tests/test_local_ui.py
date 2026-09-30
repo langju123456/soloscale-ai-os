@@ -65,6 +65,8 @@ from soloscale.model_gateway import (
     GatewayConfigurationState,
     GatewayDescriptor,
     GatewayTransportScope,
+    ModelGatewayTimeoutError,
+    ModelGatewayTransportError,
     ModelProviderId,
 )
 from soloscale.resume_docx import read_template_paragraphs
@@ -206,12 +208,16 @@ class RecordingResumeGateway:
         user: str,
         reasoning_effort: Literal["none", "low"] = "low",
     ) -> ResponseModelT:
-        assert "approved Candidate Profile facts" in system
-        assert "Deterministic hiring signals:" in system
+        request_payload = json.loads(user)
+        if request_payload["output_locale"] == "zh-CN":
+            assert "candidate_profile 中已获批的不可变事实" in system
+            assert "招聘信号：" in system
+        else:
+            assert "approved Candidate Profile facts" in system
+            assert "Deterministic hiring signals:" in system
         assert "top_hiring_signals" not in schema.model_json_schema()["properties"]
         assert reasoning_effort == "none"
         self.requests.append(user)
-        request_payload = json.loads(user)
         fact_ids_by_source: dict[str, list[str]] = {}
         for fact in request_payload["candidate_profile"]["atomic_facts"]:
             if fact["source_kind"] != "PROFILE_ENTRY":
@@ -331,6 +337,18 @@ class RecordingResumeGateway:
                 }
             role_summary = "面向目标岗位、受事实约束的简历策略。"
             guidance = "使用自然中文重组已批准事实，不增加经历。"
+            requested_edit_ids = request_payload.get(
+                "requested_edit_profile_entry_ids"
+            )
+            if isinstance(requested_edit_ids, list):
+                assert all(isinstance(entry_id, str) for entry_id in requested_edit_ids)
+                if synthesis_target not in requested_edit_ids:
+                    synthesis_target = None
+                    synthesis_sources = []
+                summary_rewrite = None
+                rewrites = {
+                    entry_id: rewrites[entry_id] for entry_id in requested_edit_ids
+                }
         skill_ids = {
             "Customer delivery, requirements, stakeholders": "SKILL-01",
             "Python, RAG, agents, evals": "SKILL-02",
@@ -1564,6 +1582,18 @@ def test_user_resume_flow_generates_matching_private_and_application_docx(
     assert "安全离线模式" in rendered
     assert "为什么这些内容会出现在我的简历里" in rendered
     assert "原文已核对" in rendered
+    metadata["truth_status"] = "REVIEW_REQUIRED"
+    metadata["requested_edit_profile_entry_ids"] = ["PROFILE-02", "PROFILE-03"]
+    metadata["requested_project_material_rewrites"] = 0
+    metadata["requested_project_rewrite_quality_status"] = "QUALITY_NOT_MET"
+    (run_dir / "09_user_ui.json").write_text(json.dumps(metadata), encoding="utf-8")
+    review_rendered = _user_page(result, tmp_path / ".soloscale", {})
+    assert "编辑草稿，需人工核对" in review_rendered
+    assert "项目改写未达到两条实质修改的检查要求" in review_rendered
+    assert "简历草稿待人工核对" in review_rendered
+    assert review_rendered.index("编辑草稿，需人工核对") < review_rendered.index(
+        "为什么这些内容会出现在我的简历里"
+    )
 
 
 def test_resume_ui_generation_is_jd_conditioned_and_keeps_unrelated_gaps_visible(
@@ -1924,7 +1954,10 @@ def test_resume_ui_rejects_only_unsafe_rewrite_and_keeps_original_bullet(
             unsafe["PROFILE-03"] = {
                 "kind": "REWRITE",
                 "text": "Led an unsupported FPGA compiler program by 40%.",
-                "source_fact_ids": rewrites["PROFILE-03"]["source_fact_ids"],
+                "target_fact_id": rewrites["PROFILE-03"]["target_fact_id"],
+                "supporting_fact_ids": rewrites["PROFILE-03"][
+                    "supporting_fact_ids"
+                ],
             }
             payload["bullet_rewrites"] = unsafe
             return schema.model_validate(payload)
@@ -2005,6 +2038,7 @@ def test_resume_ollama_factory_requests_the_resume_context_limit(
     def resume_gateway(provider: str, **kwargs: object) -> RecordingResumeGateway:
         captured["provider"] = provider
         captured["ollama_context_tokens"] = kwargs.get("ollama_context_tokens")
+        captured["ollama_timeout_seconds"] = kwargs.get("ollama_timeout_seconds")
         return RecordingResumeGateway()
 
     monkeypatch.setattr("soloscale.local_ui.KnowledgeStore", EmptyStore)
@@ -2031,7 +2065,78 @@ def test_resume_ollama_factory_requests_the_resume_context_limit(
     )
 
     assert result.return_code == 0, result.stderr
-    assert captured == {"provider": "ollama", "ollama_context_tokens": 16_384}
+    assert captured == {
+        "provider": "ollama",
+        "ollama_context_tokens": 16_384,
+        "ollama_timeout_seconds": 600,
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        (
+            ModelGatewayTimeoutError("deadline"),
+            "所选 AI 服务处理超时；本次没有重试、回退或保存新的申请包。",
+        ),
+        (
+            ModelGatewayTransportError("connection"),
+            "所选 AI 服务当前无法连接；本次没有回退到通用简历，也没有保存新的申请包。",
+        ),
+    ],
+)
+def test_resume_ui_keeps_timeout_distinct_from_connection_failure(
+    tmp_path: Path,
+    failure: ModelGatewayTransportError,
+    expected_message: str,
+) -> None:
+    class FailingGateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Test gateway",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(
+            self,
+            schema: type[ResponseModelT],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: Literal["none", "low"] = "low",
+        ) -> ResponseModelT:
+            del schema, system, user, reasoning_effort
+            self.calls += 1
+            raise failure
+
+    gateway = FailingGateway()
+    result = _run_user_resume(
+        {
+            "job_description": "Forward Deployed Engineer\nreliable agents",
+            "generation_mode": "ollama",
+            "provider_model": "test-model",
+            "approve_resume_processing": "yes",
+        },
+        {
+            "resume_template": UploadedFile(
+                filename="Synthetic.docx",
+                content_type="application/octet-stream",
+                content=_role_resume_docx(),
+            )
+        },
+        tmp_path / "data",
+        tmp_path / "repo",
+        gateway=gateway,
+    )
+    assert result.return_code == 1
+    assert result.stderr == expected_message
+    assert gateway.calls == 1
 
 
 def test_resume_ui_uses_safe_strategy_after_global_truth_rejection(

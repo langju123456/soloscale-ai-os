@@ -23,6 +23,7 @@ from soloscale.evidence_agent import (
     OllamaReasoner,
     Reasoner,
     ReasonerInvalidResponseError,
+    ReasonerTimeoutError,
     ReasonerTransportError,
 )
 from soloscale.models import ContractModel
@@ -194,6 +195,10 @@ class ModelGatewayNotConfigured(ModelGatewayError):
 
 class ModelGatewayTransportError(ModelGatewayError):
     """The configured provider could not be reached safely."""
+
+
+class ModelGatewayTimeoutError(ModelGatewayTransportError):
+    """The configured provider exceeded its processing deadline."""
 
 
 class ModelGatewayInvalidResponse(ModelGatewayError):
@@ -1398,14 +1403,17 @@ class OllamaModelGateway:
         endpoint: str = "http://127.0.0.1:11434",
         reasoner: Reasoner | None = None,
         context_tokens: int | None = None,
+        timeout_seconds: int = 180,
     ) -> None:
         selected_model = model.strip()
         if _OLLAMA_MODEL.fullmatch(selected_model) is None:
             raise ValueError("Ollama model name is invalid")
+        if timeout_seconds <= 0:
+            raise ValueError("Ollama timeout must be positive")
         selected_reasoner = reasoner or OllamaReasoner(
             endpoint=endpoint,
             model=selected_model,
-            timeout=180,
+            timeout=timeout_seconds,
             max_tokens=4096,
             context_tokens=context_tokens,
         )
@@ -1442,6 +1450,10 @@ class OllamaModelGateway:
                     **profile.model_dump(mode="python", exclude={"schema_version"}),
                 )
             return result
+        except ReasonerTimeoutError as exc:
+            raise ModelGatewayTimeoutError(
+                "local model processing deadline exceeded"
+            ) from exc
         except ReasonerTransportError as exc:
             raise ModelGatewayTransportError("local model request failed") from exc
         except ReasonerInvalidResponseError as exc:
@@ -1464,6 +1476,7 @@ def model_gateway_for(
     deepseek_transport: DeepSeekResponsesTransport | None = None,
     ollama_endpoint: str = "http://127.0.0.1:11434",
     ollama_context_tokens: int | None = None,
+    ollama_timeout_seconds: int | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> ModelGateway:
     """Create one explicit provider adapter without implicit fallback."""
@@ -1550,5 +1563,8 @@ def model_gateway_for(
             endpoint=ollama_endpoint,
             reasoner=reasoner,
             context_tokens=ollama_context_tokens,
+            timeout_seconds=(
+                ollama_timeout_seconds if ollama_timeout_seconds is not None else 180
+            ),
         )
     raise AssertionError(f"provider factory is incomplete for {selected.value}")

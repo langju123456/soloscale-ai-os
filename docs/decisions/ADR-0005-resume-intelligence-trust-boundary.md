@@ -38,6 +38,9 @@ private SoloScale run.
   into personal claims.
 - Dual-save failures are visible and recoverable instead of being reported as success.
 - External application bundles remain intentionally small and human-reviewable.
-- Semantic claim rewriting, job submission, cloud sync, and automatic promotion remain out
-  of scope. The end-user flow may reorder intact uploaded-template blocks and stage the
-  byte-identical generated DOCX inside the same atomic application bundle.
+- Job submission, cloud sync, and automatic promotion remain out of scope. For zh-CN only,
+  an evidence-preserving editorial paraphrase whose lexical anchor cannot be confirmed may
+  remain an `UNVERIFIED` draft pending human review; source attribution, privacy, numbers,
+  technology, ownership, client, scale, and outcome boundaries remain blocking. The end-user
+  flow may reorder intact uploaded-template blocks and stage the byte-identical generated DOCX
+  inside the same atomic application bundle.

@@ -162,6 +162,7 @@ from soloscale.model_gateway import (
     ModelGateway,
     ModelGatewayInvalidResponse,
     ModelGatewayNotConfigured,
+    ModelGatewayTimeoutError,
     ModelGatewayTransportError,
     ModelProviderId,
     model_gateway_for,
@@ -2451,6 +2452,14 @@ def _build_resume_provenance_receipt(
         ]
 
     claims: list[ResumeClaimProvenance] = []
+    editorial_warning_ids = {
+        warning.claim_id
+        for warning in (
+            tailored.validation_diagnostics.editorial_warnings
+            if tailored.validation_diagnostics is not None
+            else ()
+        )
+    }
 
     def evidence_sources_for(fact_ids: list[str]) -> tuple[list[str], list[str]]:
         ordered_ids: list[str] = []
@@ -2488,6 +2497,7 @@ def _build_resume_provenance_receipt(
                 "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY",
                 "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE",
                 "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS",
+                "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW",
             ] = "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY"
         else:
             summary_evidence_ids, summary_evidence_hashes = evidence_sources_for(
@@ -2500,6 +2510,9 @@ def _build_resume_provenance_receipt(
             summary_fact_ids = summary_rewrite.source_fact_ids
             summary_status = ResumeClaimVerificationStatus.SUPPORTED
             summary_basis = "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS"
+            if "SUMMARY" in editorial_warning_ids:
+                summary_status = ResumeClaimVerificationStatus.UNVERIFIED
+                summary_basis = "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW"
         if summary_rewrite is None:
             summary_fact_ids = []
         claims.append(
@@ -2530,6 +2543,7 @@ def _build_resume_provenance_receipt(
             "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY",
             "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE",
             "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS",
+            "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW",
         ]
         if strategy is None:
             final_text = source_text
@@ -2568,6 +2582,9 @@ def _build_resume_provenance_receipt(
                     if rewrite.kind == "SYNTHESIS"
                     else "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE"
                 )
+                if profile_entry_id in editorial_warning_ids:
+                    status = ResumeClaimVerificationStatus.UNVERIFIED
+                    verification_basis = "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW"
         expected_output_bullets.append(final_text)
         claims.append(
             ResumeClaimProvenance(
@@ -2602,6 +2619,14 @@ def _build_resume_provenance_receipt(
         hiring_signals=signal_receipts,
         claims=claims,
         unsupported_requirement_sha256s=unsupported_requirement_sha256s,
+        all_exported_claims_supported=all(
+            claim.status
+            in {
+                ResumeClaimVerificationStatus.VERIFIED,
+                ResumeClaimVerificationStatus.SUPPORTED,
+            }
+            for claim in claims
+        ),
     )
 
 
@@ -2616,15 +2641,27 @@ def _resume_provenance_summary(
         claim.status == ResumeClaimVerificationStatus.SUPPORTED
         for claim in receipt.claims
     )
+    unverified = sum(
+        claim.status == ResumeClaimVerificationStatus.UNVERIFIED
+        for claim in receipt.claims
+    )
     return {
         "artifact": "12_resume_provenance.json",
         "claim_count": len(receipt.claims),
         "verified_claim_count": verified,
         "supported_claim_count": supported,
-        "unverified_claim_count": 0,
+        "unverified_claim_count": unverified,
         "contradicted_claim_count": 0,
-        "all_exported_claims_supported": True,
+        "all_exported_claims_supported": receipt.all_exported_claims_supported,
     }
+
+
+def _resume_truth_status(provenance_summary: dict[str, object]) -> str:
+    return (
+        "VERIFIED"
+        if provenance_summary["all_exported_claims_supported"] is True
+        else "REVIEW_REQUIRED"
+    )
 
 
 def _write_resume_expert_review_receipt(
@@ -2742,6 +2779,7 @@ def _save_request_scoped_resume_run(
     _write_private_json(provenance_path, provenance.model_dump(mode="json"))
     provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
     provenance_summary = _resume_provenance_summary(provenance)
+    truth_status = _resume_truth_status(provenance_summary)
     expert_review_sha256 = _write_resume_expert_review_receipt(run_dir, tailored)
     evidence_trace_sha256 = _write_resume_evidence_trace(run_dir, tailored)
     resume_text = "\n".join(
@@ -2839,7 +2877,7 @@ def _save_request_scoped_resume_run(
         "target_locale": output_locale,
         "output_locale": output_locale,
         "composition_status": "CONTENT_READY",
-        "truth_status": "VERIFIED",
+        "truth_status": truth_status,
         "docx_status": "DOCX_READY",
         "docx_render_ms": docx_render_ms,
         "pdf_status": pdf_status,
@@ -2872,6 +2910,16 @@ def _save_request_scoped_resume_run(
         "project_blocks_reordered": tailored.project_blocks_reordered,
         "skill_bullets_reordered": tailored.skill_bullets_reordered,
         "grounded_rewrites": tailored.grounded_rewrites,
+        "unverified_rewrites": tailored.unverified_rewrites,
+        "requested_edit_profile_entry_ids": list(
+            tailored.requested_edit_profile_entry_ids
+        ),
+        "requested_project_material_rewrites": (
+            tailored.requested_project_material_rewrites
+        ),
+        "requested_project_rewrite_quality_status": (
+            tailored.requested_project_rewrite_quality_status
+        ),
         "synthesized_rewrites": tailored.synthesized_rewrites,
         "summary_rewritten": tailored.summary_rewritten,
         "rejected_rewrites": tailored.rejected_rewrites,
@@ -2982,7 +3030,7 @@ def _save_request_scoped_resume_run(
             "candidate_profile_sha256": candidate_sha256,
             "resume_sha256": tailored.output_sha256,
             "resume_provenance_sha256": provenance_sha256,
-            "all_exported_claims_supported": True,
+            "all_exported_claims_supported": provenance.all_exported_claims_supported,
             "expert_review_performed": tailored.expert_review is not None,
             "expert_review_attempted": tailored.expert_review_attempted,
             "expert_review_skipped_code": tailored.expert_review_skipped_code,
@@ -3035,7 +3083,7 @@ def _save_request_scoped_resume_run(
             "target_locale": output_locale,
             "output_locale": output_locale,
             "composition_status": "CONTENT_READY",
-            "truth_status": "VERIFIED",
+            "truth_status": truth_status,
             "docx_status": "DOCX_READY",
             "docx_render_ms": docx_render_ms,
             "pdf_status": pdf_status,
@@ -3349,6 +3397,11 @@ def _run_user_resume(
                     if generation_mode == ModelProviderId.OLLAMA.value
                     else None
                 ),
+                ollama_timeout_seconds=(
+                    600
+                    if generation_mode == ModelProviderId.OLLAMA.value
+                    else None
+                ),
             )
             assert candidate_evidence_pack is not None
             gateway_template_metadata = (
@@ -3601,6 +3654,7 @@ def _run_user_resume(
                 "project_blocks_reordered": tailored.project_blocks_reordered,
                 "skill_bullets_reordered": tailored.skill_bullets_reordered,
                 "grounded_rewrites": tailored.grounded_rewrites,
+                "unverified_rewrites": tailored.unverified_rewrites,
                 "synthesized_rewrites": tailored.synthesized_rewrites,
                 "summary_rewritten": tailored.summary_rewritten,
                 "rejected_rewrites": tailored.rejected_rewrites,
@@ -3669,6 +3723,7 @@ def _run_user_resume(
         _write_private_json(provenance_path, provenance.model_dump(mode="json"))
         provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
         provenance_summary = _resume_provenance_summary(provenance)
+        truth_status = _resume_truth_status(provenance_summary)
         expert_review_sha256 = _write_resume_expert_review_receipt(run_dir, tailored)
         evidence_trace_sha256 = _write_resume_evidence_trace(run_dir, tailored)
         verification_path = run_dir / "07_verification.json"
@@ -3701,7 +3756,7 @@ def _run_user_resume(
             "target_locale": tailored.output_locale,
             "output_locale": tailored.output_locale,
             "composition_status": "CONTENT_READY",
-            "truth_status": "VERIFIED",
+            "truth_status": truth_status,
             "docx_status": "DOCX_READY",
             "docx_render_ms": docx_render_ms,
             "pdf_status": pdf_status,
@@ -3738,6 +3793,16 @@ def _run_user_resume(
             "project_blocks_reordered": tailored.project_blocks_reordered,
             "skill_bullets_reordered": tailored.skill_bullets_reordered,
             "grounded_rewrites": tailored.grounded_rewrites,
+            "unverified_rewrites": tailored.unverified_rewrites,
+            "requested_edit_profile_entry_ids": list(
+                tailored.requested_edit_profile_entry_ids
+            ),
+            "requested_project_material_rewrites": (
+                tailored.requested_project_material_rewrites
+            ),
+            "requested_project_rewrite_quality_status": (
+                tailored.requested_project_rewrite_quality_status
+            ),
             "synthesized_rewrites": tailored.synthesized_rewrites,
             "summary_rewritten": tailored.summary_rewritten,
             "rejected_rewrites": tailored.rejected_rewrites,
@@ -3863,7 +3928,7 @@ def _run_user_resume(
             ).hexdigest(),
             "resume_sha256": tailored.output_sha256,
             "resume_provenance_sha256": provenance_sha256,
-            "all_exported_claims_supported": True,
+            "all_exported_claims_supported": provenance.all_exported_claims_supported,
             "expert_review_performed": tailored.expert_review is not None,
             "expert_review_attempted": tailored.expert_review_attempted,
             "expert_review_skipped_code": tailored.expert_review_skipped_code,
@@ -3899,7 +3964,7 @@ def _run_user_resume(
         route["resume_provenance_sha256"] = provenance_sha256
         route["preview_generated"] = preview_created
         route["composition_status"] = "CONTENT_READY"
-        route["truth_status"] = "VERIFIED"
+        route["truth_status"] = truth_status
         route["docx_status"] = "DOCX_READY"
         route["docx_render_ms"] = docx_render_ms
         route["pdf_status"] = pdf_status
@@ -3940,6 +4005,16 @@ def _run_user_resume(
             1,
             "",
             "SoloScale 托管 AI 尚未连接到这个本地版本；没有生成通用简历，也没有保存新的申请包。请配置高级 AI 服务，或明确选择安全离线草稿。",
+            elapsed_ms,
+        )
+    except ModelGatewayTimeoutError:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        return UIActionResult(
+            "tailored-resume",
+            "AI resume generation",
+            1,
+            "",
+            "所选 AI 服务处理超时；本次没有重试、回退或保存新的申请包。",
             elapsed_ms,
         )
     except ModelGatewayTransportError:
@@ -4659,10 +4734,14 @@ def _resume_provenance_panel(
             locale,
             "原文已核对"
             if claim.status == ResumeClaimVerificationStatus.VERIFIED
-            else "改写有支持",
+            else "改写有支持"
+            if claim.status == ResumeClaimVerificationStatus.SUPPORTED
+            else "编辑草稿，需人工核对",
             "Exact source verified"
             if claim.status == ResumeClaimVerificationStatus.VERIFIED
-            else "Rewrite supported",
+            else "Rewrite supported"
+            if claim.status == ResumeClaimVerificationStatus.SUPPORTED
+            else "Editorial draft, human review required",
         )
         signal_label = ui_text(
             locale,
@@ -4677,14 +4756,20 @@ def _resume_provenance_panel(
             "</article>"
         )
     counts = _resume_provenance_summary(receipt)
+    review_notice = (
+        f'<p class="hint">{_escape(ui_text(locale, "部分改写需要你确认，投递前请核对这些内容。", "Some rewrites need your confirmation. Review them before applying."))}</p>'
+        if not receipt.all_exported_claims_supported
+        else ""
+    )
     return f'''<details class="resume-provenance">
   <summary>{_escape(ui_text(locale, "为什么这些内容会出现在我的简历里？", "Why is this on my resume?"))}</summary>
-  <p>{_escape(ui_text(locale, "每条最终 bullet 都绑定到一条你批准的简历事实。AI 改写必须保留已核对事实，无法支持的内容不会进入 DOCX。", "Every final bullet is bound to one approved resume fact. AI rewrites must preserve checked facts; unsupported content cannot enter the DOCX."))}</p>
+  <p>{_escape(ui_text(locale, "每条最终 bullet 都关联你批准的原始材料。AI 可以在事实边界内改写内容；标为待审的条目需要你在投递前核对。", "Every final bullet is linked to material you approved. AI may rewrite within the fact boundary; marked draft items need your review before applying."))}</p>
   <div class="provenance-summary">
     <strong>{_escape(str(counts["claim_count"]))}</strong>
     <span>{_escape(ui_text(locale, "条可追溯 bullet", "traceable bullets"))}</span>
   </div>
   <div class="provenance-claims">{"".join(rows)}</div>
+  {review_notice}
   <p class="hint">{_escape(ui_text(locale, "为保护隐私，本次回执只保存批准事实的 ID 和哈希，不复制原始简历或 JD 正文。连接本地工作资料后，可再查看项目、代码和 BuildLog 锚点。", "For privacy, this receipt keeps approved fact IDs and hashes without copying the source resume or JD bodies. After connecting local work, project, code, and BuildLog anchors can be shown."))}</p>
 </details>'''
 
@@ -4975,6 +5060,37 @@ def _user_result_card(
     pdf_status = str(user_metadata.get("pdf_status", "PENDING"))
     output_name = str(user_metadata.get("output_filename", "Tailored Resume.docx"))
     output_locale = str(user_metadata.get("output_locale", "en-US"))
+    review_required = user_metadata.get("truth_status") == "REVIEW_REQUIRED"
+    review_required_notice = (
+        '<p class="notice" role="status">'
+        + _escape(
+            ui_text(
+                locale,
+                "编辑草稿，需人工核对：部分改写需要你确认，投递前请核对这些内容。",
+                "Editorial draft, human review required: Some rewrites need your confirmation. Review them before applying.",
+            )
+        )
+        + "</p>"
+        if review_required
+        else ""
+    )
+    focused_quality_not_met = (
+        user_metadata.get("requested_project_rewrite_quality_status")
+        == "QUALITY_NOT_MET"
+    )
+    focused_quality_notice = (
+        '<p class="notice" role="status">'
+        + _escape(
+            ui_text(
+                locale,
+                "本次项目改写未达到两条实质修改的检查要求；请人工核对后再使用此草稿。",
+                "This draft did not meet the two-project material-edit check. Review it before use.",
+            )
+        )
+        + "</p>"
+        if focused_quality_not_met
+        else ""
+    )
     internal_path = str(user_metadata.get("internal_docx", run_dir / "08_resume.docx"))
     external_path = str(user_metadata.get("external_docx", ""))
     project_count = user_metadata.get("project_blocks_reordered", 0)
@@ -5123,6 +5239,12 @@ def _user_result_card(
             "本次是明确选择的安全离线草稿；没有模型或网络调用。",
             "This was an explicitly selected safe offline draft. No model or network call occurred.",
         )
+    if focused_quality_not_met:
+        result_summary = ui_text(
+            locale,
+            "已生成可核对的简历草稿，但项目改写未达到两条实质修改的检查要求。",
+            "A reviewable resume draft was generated, but it did not meet the two-project material-edit check.",
+        )
     download = (
         f'<a class="primary-button download" href="{_escape(download_url)}" download '
         f'title="{_escape(output_name)}">{_escape(ui_text(locale, "下载 DOCX 简历", "Download DOCX resume"))}</a>'
@@ -5209,8 +5331,14 @@ def _user_result_card(
     )
     result_heading = ui_text(
         locale,
-        "简历可先下载，预览正在生成" if job_running else "针对性简历已生成",
-        "Your resume can be downloaded while preview finishes"
+        "简历草稿待人工核对"
+        if focused_quality_not_met
+        else "简历可先下载，预览正在生成"
+        if job_running
+        else "针对性简历已生成",
+        "Resume draft needs human review"
+        if focused_quality_not_met
+        else "Your resume can be downloaded while preview finishes"
         if job_running
         else "Your tailored resume is ready",
     )
@@ -5227,6 +5355,8 @@ def _user_result_card(
     {download}
   </div>
   <p class="privacy-note"><strong>{_escape(ui_text(locale, '输出语言', 'Output language'))}:</strong> {_escape(output_locale)}</p>
+  {review_required_notice}
+  {focused_quality_notice}
   {f'<div class="resume-variant-downloads">{"".join(variant_cards)}</div>' if variant_cards else ''}
   <div class="metrics" aria-label="{_escape(ui_text(locale, '覆盖情况', 'Coverage'))}">
     <div><strong>{_escape(str(coverage.get("total", 0)))}</strong><span>{_escape(ui_text(locale, '岗位要求', 'Requirements'))}</span></div>

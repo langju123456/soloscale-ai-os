@@ -71,6 +71,10 @@ class ReasonerTransportError(ReasonerError):
     """Raised when the configured local reasoner cannot be reached safely."""
 
 
+class ReasonerTimeoutError(ReasonerTransportError):
+    """Raised when the configured local reasoner exceeds its processing deadline."""
+
+
 class ReasonerInvalidResponseError(ReasonerError):
     """Raised when a reasoner response does not satisfy its requested contract."""
 
@@ -324,7 +328,15 @@ class OllamaReasoner:
         try:
             with self._opener(request, timeout=self.timeout) as response:
                 raw = response.read(_MAX_REASONER_RESPONSE_BYTES + 1)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        except TimeoutError:
+            raise ReasonerTimeoutError("local reasoner processing deadline exceeded") from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise ReasonerTimeoutError(
+                    "local reasoner processing deadline exceeded"
+                ) from None
+            raise ReasonerTransportError("local reasoner request failed") from None
+        except (urllib.error.HTTPError, OSError):
             raise ReasonerTransportError("local reasoner request failed") from None
         except Exception:
             raise ReasonerTransportError("local reasoner request failed") from None

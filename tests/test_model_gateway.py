@@ -3,11 +3,17 @@ import json
 import urllib.error
 import urllib.request
 from email.message import Message
+from typing import cast
 
 import pytest
 from pydantic import BaseModel, Field
 
-from soloscale.evidence_agent import OllamaCallProfile
+from soloscale.evidence_agent import (
+    OllamaCallProfile,
+    Reasoner,
+    ReasonerTimeoutError,
+    ReasonerTransportError,
+)
 from soloscale.model_gateway import (
     DEEPSEEK_MODEL_IDS,
     DEEPSEEK_RESPONSES_URL,
@@ -21,6 +27,7 @@ from soloscale.model_gateway import (
     MockHostedGatewayTransport,
     ModelGatewayInvalidResponse,
     ModelGatewayNotConfigured,
+    ModelGatewayTimeoutError,
     ModelGatewayTransportError,
     ModelProviderId,
     OllamaModelGateway,
@@ -314,6 +321,40 @@ def test_ollama_factory_forwards_an_optional_context_limit() -> None:
     default_gateway = model_gateway_for(ModelProviderId.OLLAMA, model="qwen3:8b")
     assert isinstance(default_gateway, OllamaModelGateway)
     assert default_gateway._reasoner.context_tokens is None  # type: ignore[attr-defined]
+    assert default_gateway._reasoner.timeout == 180  # type: ignore[attr-defined]
+    resume_gateway = model_gateway_for(
+        ModelProviderId.OLLAMA,
+        model="qwen3:8b",
+        ollama_context_tokens=16_384,
+        ollama_timeout_seconds=600,
+    )
+    assert isinstance(resume_gateway, OllamaModelGateway)
+    assert resume_gateway._reasoner.timeout == 600  # type: ignore[attr-defined]
+
+
+def test_ollama_gateway_preserves_timeout_and_transport_categories() -> None:
+    class TimeoutReasoner(_ScriptedReasoner):
+        def complete(
+            self, schema: type[_Reply], *, system: str, user: str
+        ) -> _Reply:
+            del schema, system, user
+            raise ReasonerTimeoutError("deadline")
+
+    gateway = OllamaModelGateway(reasoner=cast(Reasoner, TimeoutReasoner()))
+    with pytest.raises(ModelGatewayTimeoutError):
+        gateway.complete(_Reply, system="system", user="user")
+
+    class TransportReasoner(_ScriptedReasoner):
+        def complete(
+            self, schema: type[_Reply], *, system: str, user: str
+        ) -> _Reply:
+            del schema, system, user
+            raise ReasonerTransportError("connection failed")
+
+    gateway = OllamaModelGateway(reasoner=cast(Reasoner, TransportReasoner()))
+    with pytest.raises(ModelGatewayTransportError) as error:
+        gateway.complete(_Reply, system="system", user="user")
+    assert not isinstance(error.value, ModelGatewayTimeoutError)
 
 
 def test_openai_compatible_gateway_requires_explicit_in_memory_configuration() -> None:

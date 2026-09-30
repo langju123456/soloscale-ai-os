@@ -617,6 +617,7 @@ class ResumeClaimProvenance(ContractModel):
         "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY",
         "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE",
         "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS",
+        "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW",
     ]
 
     @model_validator(mode="after")
@@ -653,11 +654,8 @@ class ResumeClaimProvenance(ContractModel):
             raise ValueError("every source fact ID requires an ordered fact hash")
         if len(self.hiring_signal_ids) != len(set(self.hiring_signal_ids)):
             raise ValueError("hiring signal identities must be unique")
-        if self.status not in {
-            ResumeClaimVerificationStatus.VERIFIED,
-            ResumeClaimVerificationStatus.SUPPORTED,
-        }:
-            raise ValueError("unverified or contradicted claims cannot be exported")
+        if self.status == ResumeClaimVerificationStatus.CONTRADICTED:
+            raise ValueError("contradicted claims cannot be exported")
         if self.render_location == "SUMMARY" and self.profile_entry_id != "SUMMARY":
             raise ValueError("summary provenance must target the Summary slot")
         if self.render_location == "BULLET" and not self.profile_entry_id.startswith(
@@ -677,7 +675,7 @@ class ResumeClaimProvenance(ContractModel):
                 raise ValueError("VERIFIED claims do not need rewrite source facts")
         else:
             if self.verification_basis == "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY":
-                raise ValueError("SUPPORTED claims require a rewrite or synthesis basis")
+                raise ValueError("non-exact claims require a rewrite, synthesis, or review basis")
             if len(self.source_fact_sha256s) < len(self.evidence_ids):
                 raise ValueError("every supported evidence source needs a hashed fact")
             fact_source_ids = {
@@ -705,6 +703,11 @@ class ResumeClaimProvenance(ContractModel):
         if self.verification_basis == "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS":
             if len(self.fact_ids) < 2:
                 raise ValueError("synthesis requires multiple approved atomic facts")
+        if self.status == ResumeClaimVerificationStatus.UNVERIFIED:
+            if self.verification_basis != "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW":
+                raise ValueError("UNVERIFIED claims require the editorial review basis")
+        elif self.verification_basis == "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW":
+            raise ValueError("editorial review basis requires an UNVERIFIED claim")
         return self
 
 
@@ -724,7 +727,7 @@ class ResumeProvenanceReceipt(ContractModel):
         min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES + 1
     )
     unsupported_requirement_sha256s: list[str] = Field(default_factory=list, max_length=16)
-    all_exported_claims_supported: Literal[True] = True
+    all_exported_claims_supported: bool
     final_human_review_required: Literal[True] = True
 
     @model_validator(mode="after")
@@ -746,6 +749,16 @@ class ResumeProvenanceReceipt(ContractModel):
             set(self.unsupported_requirement_sha256s)
         ):
             raise ValueError("unsupported requirement hashes must be unique")
+        derived_all_supported = all(
+            item.status
+            in {
+                ResumeClaimVerificationStatus.VERIFIED,
+                ResumeClaimVerificationStatus.SUPPORTED,
+            }
+            for item in self.claims
+        )
+        if self.all_exported_claims_supported != derived_all_supported:
+            raise ValueError("all_exported_claims_supported must match claim statuses")
         return self
 
 

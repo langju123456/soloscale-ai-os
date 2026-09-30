@@ -27,6 +27,7 @@ from soloscale.evidence_agent import (
     QueryPlan,
     Reasoner,
     ReasonerInvalidResponseError,
+    ReasonerTimeoutError,
     ReasonerTransportError,
     ResponseModelT,
     _focused_truncate_utf8,
@@ -1320,6 +1321,40 @@ def test_ollama_context_option_is_optional_and_requires_a_positive_integer() -> 
     for invalid in (0, -1, True, "16384"):
         with pytest.raises(ValueError, match="context_tokens"):
             OllamaReasoner(context_tokens=invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("deadline"), urllib.error.URLError(TimeoutError("deadline"))],
+)
+def test_ollama_timeout_is_classified_separately_from_transport(
+    failure: Exception,
+) -> None:
+    calls = 0
+
+    def open_request(*args: object, **kwargs: object) -> FakeHTTPResponse:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise failure
+
+    reasoner = OllamaReasoner(opener=open_request)
+    with pytest.raises(ReasonerTimeoutError):
+        reasoner.complete(QueryPlan, system="system", user="user")
+    assert calls == 1
+
+
+def test_ollama_http_error_remains_a_transport_failure() -> None:
+    def open_request(*args: object, **kwargs: object) -> FakeHTTPResponse:
+        del args, kwargs
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:11434", 500, "error", Message(), None
+        )
+
+    reasoner = OllamaReasoner(opener=open_request)
+    with pytest.raises(ReasonerTransportError) as error:
+        reasoner.complete(QueryPlan, system="system", user="user")
+    assert not isinstance(error.value, ReasonerTimeoutError)
 
 
 def test_ollama_default_transport_disables_proxies_and_redirects(
