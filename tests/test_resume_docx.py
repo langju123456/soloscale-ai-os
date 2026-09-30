@@ -141,6 +141,36 @@ def _template_docx() -> bytes:
     return target.getvalue()
 
 
+def _chinese_literal_bullet_template_docx() -> bytes:
+    paragraphs = [
+        _paragraph("测试工程师"),
+        _paragraph("AI 应用工程师"),
+        _paragraph("项目经历"),
+        _paragraph("检索项目"),
+        _paragraph("• Built RAG retrieval service."),
+        _paragraph("教育背景"),
+        _paragraph("计算机科学硕士"),
+        _paragraph("专业技能"),
+        _paragraph("Python"),
+        _paragraph("Docker", bullet=True),
+        _paragraph("• RAG"),
+        _paragraph("工作经历"),
+        _paragraph("示例公司"),
+        _paragraph("• Delivered verified AI workflow."),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
 def _duplicate_claim_template_docx() -> bytes:
     repeated = "Built Python evidence service."
     paragraphs = [
@@ -426,6 +456,109 @@ def test_extract_profile_and_tailor_preserve_every_candidate_claim() -> None:
         for name in source.namelist():
             if name != "word/document.xml":
                 assert tailored.read(name) == source.read(name)
+
+
+def test_chinese_literal_bullets_and_plain_skill_lines_reparse_after_tailoring() -> None:
+    template = _chinese_literal_bullet_template_docx()
+    profile = extract_candidate_profile(template)
+
+    assert profile.project_bullets == ["• Built RAG retrieval service."]
+    assert profile.experience_bullets == ["• Delivered verified AI workflow."]
+    assert profile.skills == ["Python", "Docker", "• RAG"]
+    assert profile.education == ["计算机科学硕士"]
+
+    tailored = tailor_resume_docx(template, "Docker")
+    reparsed = extract_candidate_profile(tailored.content)
+
+    assert reparsed.project_bullets == profile.project_bullets
+    assert reparsed.experience_bullets == profile.experience_bullets
+    assert reparsed.education == profile.education
+    visible = [item.text for item in read_template_paragraphs(tailored.content)]
+    assert visible[visible.index("专业技能") + 1 : visible.index("工作经历")] == [
+        "Docker", "Python", "• RAG"
+    ]
+
+
+def test_ai_literal_bullet_rewrite_restores_original_marker_and_provenance() -> None:
+    template = _chinese_literal_bullet_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02"]
+    fact_ids = {
+        entry_id: _fact_ids(profile, entry_id)
+        for entry_id in entry_ids
+    }
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "构建 AI 工作流。",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-03", "SKILL-02", "SKILL-01"],
+                    "bullet_rewrites": {
+                        "PROFILE-01": {
+                            "kind": "REWRITE",
+                            "text": "• Delivered verified AI workflow.",
+                            "source_fact_ids": fact_ids["PROFILE-01"],
+                        },
+                        "PROFILE-02": {
+                            "kind": "REWRITE",
+                            "text": "Built RAG retrieval service.",
+                            "source_fact_ids": fact_ids["PROFILE-02"],
+                        },
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "保留已批准事实。",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "RAG Docker Python",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    receipt = _build_resume_provenance_receipt(
+        run_id="resume-20260930T000000Z-chinese-literal",
+        job_description="RAG Docker Python",
+        profile=profile,
+        tailored=tailored,
+    )
+
+    reparsed = extract_candidate_profile(tailored.content)
+    assert reparsed.project_bullets == ["• Built RAG retrieval service."]
+    assert reparsed.experience_bullets == ["• Delivered verified AI workflow."]
+    assert reparsed.skills == ["• RAG", "Docker", "Python"]
+    assert tailored.rendered_profile_entry_ids == tuple(entry_ids)
+    assert tailored.role_strategy is not None
+    assert [rewrite.text for rewrite in tailored.role_strategy.bullet_rewrites] == [
+        "• Delivered verified AI workflow.",
+        "• Built RAG retrieval service.",
+    ]
+    assert tailored.grounded_rewrites == 0
+    assert tailored.validation_diagnostics is not None
+    assert tailored.validation_diagnostics.verified_count == 2
+    assert tailored.validation_diagnostics.supported_count == 0
+    assert all(not item.accepted and not item.rendered for item in tailored.evidence_adoption)
+    assert [claim.profile_entry_id for claim in receipt.claims] == entry_ids
 
 
 def test_external_template_reorders_sections_without_importing_body_copy() -> None:

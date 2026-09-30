@@ -104,6 +104,7 @@ _CANONICAL_SECTION_HEADINGS = {
     "项目经历": "PROJECT HIGHLIGHTS",
     "教育": "EDUCATION",
     "教育经历": "EDUCATION",
+    "教育背景": "EDUCATION",
     "技能": "TECHNICAL SKILLS",
     "技术技能": "TECHNICAL SKILLS",
     "专业技能": "TECHNICAL SKILLS",
@@ -284,7 +285,10 @@ def _remove_trailing_empty_paragraphs(body: ElementTree.Element) -> int:
 
 def _is_bullet(paragraph: ElementTree.Element) -> bool:
     properties = paragraph.find(f"{_W}pPr")
-    return properties is not None and properties.find(f"{_W}numPr") is not None
+    return (
+        (properties is not None and properties.find(f"{_W}numPr") is not None)
+        or _paragraph_text(paragraph).startswith("•")
+    )
 
 
 def _validate_member(info: zipfile.ZipInfo) -> None:
@@ -487,7 +491,7 @@ def extract_candidate_profile(template: bytes) -> CandidateProfile:
         full_name=identity[0] if identity else None,
         headline=identity[1] if len(identity) > 1 else None,
         summary=summary[0] if summary else None,
-        skills=[paragraph.text for paragraph in skills if paragraph.text and paragraph.is_bullet],
+        skills=_nonblank_text(skills),
         project_bullets=[
             paragraph.text for paragraph in projects if paragraph.text and paragraph.is_bullet
         ],
@@ -591,6 +595,14 @@ def _reorder_project_blocks(
     return reordered_count
 
 
+def _skill_line_positions(section: list[ElementTree.Element]) -> list[int]:
+    return [
+        index
+        for index, child in enumerate(section)
+        if child.tag == f"{_W}p" and _paragraph_text(child)
+    ]
+
+
 def _reorder_skill_bullets(
     body: ElementTree.Element, children: list[ElementTree.Element], job_terms: set[str]
 ) -> int:
@@ -599,10 +611,10 @@ def _reorder_skill_bullets(
         return 0
     start, end = bounds
     section = children[start:end]
-    bullet_positions = [index for index, child in enumerate(section) if _is_bullet(child)]
-    if len(bullet_positions) < 2:
+    skill_positions = _skill_line_positions(section)
+    if len(skill_positions) < 2:
         return 0
-    bullets = [section[index] for index in bullet_positions]
+    bullets = [section[index] for index in skill_positions]
     ranked = sorted(
         enumerate(bullets),
         key=lambda item: (-_score(_paragraph_text(item[1]), job_terms), item[0]),
@@ -610,7 +622,7 @@ def _reorder_skill_bullets(
     reordered_count = sum(index != original for index, (original, _) in enumerate(ranked))
     if reordered_count:
         replacement = list(section)
-        for position, (_, bullet) in zip(bullet_positions, ranked, strict=True):
+        for position, (_, bullet) in zip(skill_positions, ranked, strict=True):
             replacement[position] = bullet
         _replace_range(body, start, end, replacement)
     return reordered_count
@@ -1709,8 +1721,8 @@ def _reorder_skill_bullets_by_priority(
         return 0
     start, end = bounds
     section = children[start:end]
-    bullet_positions = [index for index, child in enumerate(section) if _is_bullet(child)]
-    bullets = [section[index] for index in bullet_positions]
+    skill_positions = _skill_line_positions(section)
+    bullets = [section[index] for index in skill_positions]
     if Counter(_paragraph_text(bullet) for bullet in bullets) != Counter(skill_priority):
         raise ResumeTemplateError("Approved skill lines do not map cleanly to the DOCX")
     bullets_by_text: dict[str, list[ElementTree.Element]] = {}
@@ -1719,11 +1731,11 @@ def _reorder_skill_bullets_by_priority(
     reordered = [bullets_by_text[text].pop(0) for text in skill_priority]
     reordered_count = sum(
         section[position] is not bullet
-        for position, bullet in zip(bullet_positions, reordered, strict=True)
+        for position, bullet in zip(skill_positions, reordered, strict=True)
     )
     if reordered_count:
         replacement = list(section)
-        for position, bullet in zip(bullet_positions, reordered, strict=True):
+        for position, bullet in zip(skill_positions, reordered, strict=True):
             replacement[position] = bullet
         _replace_range(body, start, end, replacement)
     return reordered_count
@@ -1737,6 +1749,10 @@ def _replace_bullet_element_text(
     text_nodes = list(paragraph.iter(f"{_W}t"))
     if not text_nodes:
         raise ResumeTemplateError("Approved DOCX bullet has no writable text")
+    original_text = "".join(node.text or "" for node in text_nodes)
+    literal_prefix = re.match(r"^\s*•\s*", original_text)
+    if literal_prefix is not None and not replacement_text.lstrip().startswith("•"):
+        replacement_text = f"{literal_prefix.group()}{replacement_text}"
     text_nodes[0].text = replacement_text
     for node in text_nodes[1:]:
         node.text = ""
@@ -2099,6 +2115,29 @@ def tailor_resume_docx_with_gateway(
         _replace_bullet_element_text(
             entry_elements[entry_id], replacement_text=rewrite_by_id[entry_id]
         )
+    strategy = strategy.model_copy(
+        update={
+            "bullet_rewrites": [
+                rewrite.model_copy(
+                    update={"text": _paragraph_text(entry_elements[rewrite.profile_entry_id])}
+                )
+                for rewrite in strategy.bullet_rewrites
+            ]
+        }
+    )
+    rendered_rewrite_count = sum(
+        rewrite.text != entries[rewrite.profile_entry_id]
+        for rewrite in strategy.bullet_rewrites
+    ) + int(summary_rewritten)
+    validation_diagnostics = replace(
+        validation_diagnostics,
+        verified_count=(
+            validation_diagnostics.candidate_count
+            - validation_diagnostics.rejected_count
+            - rendered_rewrite_count
+        ),
+        supported_count=rendered_rewrite_count,
+    )
     _localize_resume_headings(body, output_locale)
     _remove_trailing_empty_paragraphs(body)
     if len(source_paragraphs) != sum(
