@@ -302,6 +302,20 @@ def test_optional_ollama_gateway_delegates_only_to_the_supplied_reasoner() -> No
         model_gateway_for("unknown-provider")
 
 
+def test_ollama_factory_forwards_an_optional_context_limit() -> None:
+    gateway = model_gateway_for(
+        ModelProviderId.OLLAMA,
+        model="qwen3:8b",
+        ollama_context_tokens=16_384,
+    )
+
+    assert isinstance(gateway, OllamaModelGateway)
+    assert gateway._reasoner.context_tokens == 16_384  # type: ignore[attr-defined]
+    default_gateway = model_gateway_for(ModelProviderId.OLLAMA, model="qwen3:8b")
+    assert isinstance(default_gateway, OllamaModelGateway)
+    assert default_gateway._reasoner.context_tokens is None  # type: ignore[attr-defined]
+
+
 def test_openai_compatible_gateway_requires_explicit_in_memory_configuration() -> None:
     unconfigured = model_gateway_for(
         ModelProviderId.OPENAI_COMPATIBLE,

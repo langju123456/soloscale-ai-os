@@ -13,3 +13,14 @@ provenance identities remain unchanged.
 
 This behavior is covered with synthetic Chinese fixtures only. Real resumes and local
 dogfood artifacts remain outside the repository.
+
+For Chinese output, an exact cited `PROFILE_ENTRY` fact remains valid when the model
+preserves its text after whitespace normalization and omits the source's leading literal
+`•` marker. This is only an anchor check: source identity, protected facts, numbers,
+technology, ownership, inflation, and multi-fact representation checks still apply.
+Resume-only local Ollama requests use a validated `num_ctx=16384` option; other Ollama
+callers retain their existing default request options.
+
+Project reordering moves each heading, any following plain descriptive paragraph, and its
+bullets together. A following non-bullet begins another project only after the current
+project contains a bullet.

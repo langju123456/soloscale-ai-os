@@ -141,6 +141,33 @@ def _template_docx() -> bytes:
     return target.getvalue()
 
 
+def _project_description_template_docx() -> bytes:
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("Search Project"),
+        _paragraph("Search project description."),
+        _paragraph("Built Python RAG retrieval.", bullet=True),
+        _paragraph("Platform Project"),
+        _paragraph("Platform project description."),
+        _paragraph("Shipped Docker automation.", bullet=True),
+        _paragraph("EDUCATION"),
+        _paragraph("M.S. Information Systems"),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
 def _chinese_literal_bullet_template_docx() -> bytes:
     paragraphs = [
         _paragraph("测试工程师"),
@@ -456,6 +483,83 @@ def test_extract_profile_and_tailor_preserve_every_candidate_claim() -> None:
         for name in source.namelist():
             if name != "word/document.xml":
                 assert tailored.read(name) == source.read(name)
+
+
+def test_project_reordering_keeps_plain_descriptions_with_their_bullets() -> None:
+    template = _project_description_template_docx()
+    profile = extract_candidate_profile(template)
+    expected_project_order = [
+        "Platform Project",
+        "Platform project description.",
+        "Shipped Docker automation.",
+        "Search Project",
+        "Search project description.",
+        "Built Python RAG retrieval.",
+    ]
+
+    deterministic = tailor_resume_docx(template, "Required: Docker platform delivery")
+    deterministic_text = [
+        paragraph.text for paragraph in read_template_paragraphs(deterministic.content)
+    ]
+    start = deterministic_text.index("Platform Project")
+    assert deterministic_text[start : start + 6] == expected_project_order
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Prioritize platform delivery.",
+                    "evidence_priority": ["PROFILE-02", "PROFILE-01"],
+                    "skill_priority": [],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": text,
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id, text in zip(
+                            ["PROFILE-01", "PROFILE-02"],
+                            profile.project_bullets,
+                            strict=True,
+                        )
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve approved facts.",
+                }
+            )
+
+    prioritized = tailor_resume_docx_with_gateway(
+        template,
+        "Required: Docker platform delivery",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    prioritized_text = [
+        paragraph.text for paragraph in read_template_paragraphs(prioritized.content)
+    ]
+    start = prioritized_text.index("Platform Project")
+    assert prioritized_text[start : start + 6] == expected_project_order
+    assert sorted(prioritized_text) == sorted(
+        paragraph.text for paragraph in read_template_paragraphs(template)
+    )
 
 
 def test_chinese_literal_bullets_and_plain_skill_lines_reparse_after_tailoring() -> None:
@@ -1103,6 +1207,106 @@ def test_selective_rewrite_keeps_supported_claim_and_restores_rejected_claim() -
     assert {
         failure.rule_code for failure in diagnostics.failures
     } >= {ResumeValidationRuleCode.CLAIM_TECHNOLOGY_INFLATION}
+
+
+def test_chinese_source_copies_without_literal_bullets_pass_the_anchor_gate() -> None:
+    first_source = "• 负责AI应用开发"
+    second_source = "• 维护本地检索系统"
+    profile = CandidateProfile(project_bullets=[first_source, second_source])
+    strategy = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="负责 AI 应用开发",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+        rewrite_guidance="Preserve approved facts.",
+    )
+
+    _validate_role_strategy(
+        strategy,
+        profile=profile,
+        job_description="Required: AI application development.",
+        output_locale="zh-CN",
+    )
+
+
+def test_chinese_exact_identity_does_not_bypass_mutation_or_missing_synthesis_fact() -> None:
+    first_source = "• 负责AI应用开发"
+    second_source = "• 维护本地检索系统"
+    profile = CandidateProfile(project_bullets=[first_source, second_source])
+    mutated = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        rewrite_guidance="Preserve approved facts.",
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="主导AI应用开发",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+    )
+    with pytest.raises(ResumeTemplateError) as mutated_error:
+        _validate_role_strategy(
+            mutated,
+            profile=profile,
+            job_description="Required: AI application development.",
+            output_locale="zh-CN",
+        )
+    assert mutated_error.value.validation_diagnostics is not None
+    assert any(
+        failure.rule_code == ResumeValidationRuleCode.CLAIM_NO_EVIDENCE
+        for failure in mutated_error.value.validation_diagnostics.failures
+    )
+
+    missing_second_fact = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        rewrite_guidance="Preserve approved facts.",
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                kind="SYNTHESIS",
+                text="负责AI应用开发",
+                source_profile_entry_ids=["PROFILE-01", "PROFILE-02"],
+                source_fact_ids=_fact_ids(profile, "PROFILE-01", "PROFILE-02"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+    )
+    with pytest.raises(ResumeTemplateError) as synthesis_error:
+        _validate_role_strategy(
+            missing_second_fact,
+            profile=profile,
+            job_description="Required: AI application development.",
+            output_locale="zh-CN",
+        )
+    assert synthesis_error.value.validation_diagnostics is not None
+    assert any(
+        failure.rule_code == ResumeValidationRuleCode.CLAIM_NO_EVIDENCE
+        for failure in synthesis_error.value.validation_diagnostics.failures
+    )
 
 
 def test_multi_source_synthesis_uses_union_and_falls_back_only_unsafe_slots() -> None:

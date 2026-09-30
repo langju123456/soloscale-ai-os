@@ -1298,6 +1298,28 @@ def test_ollama_requests_native_json_schema_with_deterministic_options() -> None
     assert profile.done_reason == "stop"
     assert profile.thinking_enabled is False
     assert profile.thinking_chars == 0
+    assert profile.requested_context_tokens is None
+
+
+def test_ollama_context_option_is_optional_and_requires_a_positive_integer() -> None:
+    captured: dict[str, Any] = {}
+
+    def open_request(request: Any, *, timeout: float) -> FakeHTTPResponse:
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(
+            json.dumps({"message": {"content": json.dumps({"queries": ["evidence"]})}}).encode()
+        )
+
+    reasoner = OllamaReasoner(context_tokens=16_384, opener=open_request)
+    assert reasoner.complete(QueryPlan, system="system", user="user").queries == ["evidence"]
+    assert captured["payload"]["options"]["num_ctx"] == 16_384
+    assert reasoner.last_call_profile is not None
+    assert reasoner.last_call_profile.requested_context_tokens == 16_384
+
+    for invalid in (0, -1, True, "16384"):
+        with pytest.raises(ValueError, match="context_tokens"):
+            OllamaReasoner(context_tokens=invalid)  # type: ignore[arg-type]
 
 
 def test_ollama_default_transport_disables_proxies_and_redirects(

@@ -1366,6 +1366,7 @@ def _resume_gateway_from_selection(
             selection.provider,
             model=selection.model,
             ollama_endpoint=preference.ollama_url,
+            ollama_context_tokens=16_384,
         )
     elif selection.provider is ModelProviderId.OPENAI_COMPATIBLE:
         gateway = model_gateway_for(
@@ -3343,6 +3344,11 @@ def _run_user_resume(
             selected_gateway = gateway or model_gateway_for(
                 generation_mode,
                 model=form.get("provider_model", "qwen3:8b"),
+                ollama_context_tokens=(
+                    16_384
+                    if generation_mode == ModelProviderId.OLLAMA.value
+                    else None
+                ),
             )
             assert candidate_evidence_pack is not None
             gateway_template_metadata = (

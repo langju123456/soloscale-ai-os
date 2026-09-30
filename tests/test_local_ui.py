@@ -1989,6 +1989,51 @@ def test_resume_ui_rejects_only_unsafe_rewrite_and_keeps_original_bullet(
     assert "Summary已重写" in rendered
 
 
+def test_resume_ollama_factory_requests_the_resume_context_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class EmptyStore:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def search(self, query: str, limit: int) -> list[RetrievalHit]:
+            del query, limit
+            return []
+
+    captured: dict[str, object] = {}
+
+    def resume_gateway(provider: str, **kwargs: object) -> RecordingResumeGateway:
+        captured["provider"] = provider
+        captured["ollama_context_tokens"] = kwargs.get("ollama_context_tokens")
+        return RecordingResumeGateway()
+
+    monkeypatch.setattr("soloscale.local_ui.KnowledgeStore", EmptyStore)
+    monkeypatch.setattr("soloscale.local_ui.model_gateway_for", resume_gateway)
+    monkeypatch.setattr(
+        "soloscale.local_ui._create_resume_pdf_preview", lambda source, target: False
+    )
+    result = _run_user_resume(
+        {
+            "job_description": "Required: Python and RAG.",
+            "generation_mode": "ollama",
+            "provider_model": "test-model",
+            "approve_resume_processing": "yes",
+        },
+        {
+            "resume_template": UploadedFile(
+                filename="Synthetic.docx",
+                content_type="application/octet-stream",
+                content=_role_resume_docx(),
+            )
+        },
+        tmp_path / "data",
+        tmp_path / "repo",
+    )
+
+    assert result.return_code == 0, result.stderr
+    assert captured == {"provider": "ollama", "ollama_context_tokens": 16_384}
+
+
 def test_resume_ui_uses_safe_strategy_after_global_truth_rejection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

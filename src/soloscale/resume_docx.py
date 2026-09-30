@@ -556,6 +556,35 @@ def _replace_range(
         body.insert(start + offset, child)
 
 
+def _project_blocks(
+    section: list[ElementTree.Element],
+) -> tuple[list[ElementTree.Element], list[list[ElementTree.Element]]]:
+    """Keep each project's heading, description, and bullets as one movable block."""
+
+    prefix: list[ElementTree.Element] = []
+    blocks: list[list[ElementTree.Element]] = []
+    current: list[ElementTree.Element] = []
+    for child in section:
+        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
+        starts_next_project = (
+            text
+            and not _is_bullet(child)
+            and any(_is_bullet(item) for item in current)
+        )
+        if starts_next_project:
+            blocks.append(current)
+            current = [child]
+        elif current:
+            current.append(child)
+        elif text and not _is_bullet(child):
+            current = [child]
+        else:
+            prefix.append(child)
+    if current:
+        blocks.append(current)
+    return prefix, blocks
+
+
 def _reorder_project_blocks(
     body: ElementTree.Element, children: list[ElementTree.Element], job_terms: set[str]
 ) -> int:
@@ -564,21 +593,7 @@ def _reorder_project_blocks(
         return 0
     start, end = bounds
     section = children[start:end]
-    prefix: list[ElementTree.Element] = []
-    blocks: list[list[ElementTree.Element]] = []
-    current: list[ElementTree.Element] = []
-    for child in section:
-        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
-        if text and not _is_bullet(child):
-            if current:
-                blocks.append(current)
-            current = [child]
-        elif current:
-            current.append(child)
-        else:
-            prefix.append(child)
-    if current:
-        blocks.append(current)
+    prefix, blocks = _project_blocks(section)
     if len(blocks) < 2:
         return 0
     ranked = sorted(
@@ -1089,6 +1104,13 @@ def _fact_anchor_terms(text: str) -> set[str]:
     return anchors or terms
 
 
+def _exact_profile_fact_identity(text: str) -> str:
+    """Normalize the one source-preserving identity accepted by the anchor gate."""
+
+    compact = "".join(text.split())
+    return compact.removeprefix("•")
+
+
 def _cross_locale_fact_match(
     *,
     source_fact: str,
@@ -1293,6 +1315,11 @@ def _validate_role_strategy(
                 )
                 break
         for fact in resolved_facts:
+            exact_profile_fact_identity_match = (
+                fact.source_kind == "PROFILE_ENTRY"
+                and _exact_profile_fact_identity(fact.text)
+                == _exact_profile_fact_identity(text)
+            )
             fact_anchors = _fact_anchor_terms(fact.text)
             if output_locale == "zh-CN":
                 fact_anchors = {
@@ -1312,6 +1339,7 @@ def _validate_role_strategy(
             if (
                 not (fact_anchors & output_terms)
                 and not cross_locale_anchor_present
+                and not exact_profile_fact_identity_match
             ):
                 reject(
                     ResumeValidationRuleCode.CLAIM_NO_EVIDENCE,
@@ -1676,21 +1704,7 @@ def _reorder_project_blocks_by_priority(
         return 0
     start, end = bounds
     section = children[start:end]
-    prefix: list[ElementTree.Element] = []
-    blocks: list[list[ElementTree.Element]] = []
-    current: list[ElementTree.Element] = []
-    for child in section:
-        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
-        if text and not _is_bullet(child):
-            if current:
-                blocks.append(current)
-            current = [child]
-        elif current:
-            current.append(child)
-        else:
-            prefix.append(child)
-    if current:
-        blocks.append(current)
+    prefix, blocks = _project_blocks(section)
     ranked = sorted(
         enumerate(blocks),
         key=lambda item: (

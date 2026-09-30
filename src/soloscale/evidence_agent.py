@@ -100,6 +100,7 @@ class OllamaCallProfile(_StrictModel):
     user_chars: int = Field(ge=0)
     schema_chars: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
+    requested_context_tokens: int | None = Field(default=None, ge=1)
     thinking_enabled: Literal[False] = False
     prompt_eval_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
@@ -251,12 +252,22 @@ class OllamaReasoner:
         model: str = "qwen3:8b",
         timeout: float = 120.0,
         max_tokens: int = 2048,
+        context_tokens: int | None = None,
         opener: Callable[..., Any] | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        if (
+            context_tokens is not None
+            and (
+                not isinstance(context_tokens, int)
+                or isinstance(context_tokens, bool)
+                or context_tokens <= 0
+            )
+        ):
+            raise ValueError("context_tokens must be a positive integer")
         if not endpoint.strip():
             raise ValueError("endpoint must not be empty")
         if not model.strip():
@@ -266,6 +277,7 @@ class OllamaReasoner:
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.context_tokens = context_tokens
         self.last_call_profile: OllamaCallProfile | None = None
         if opener is None:
             direct_opener = urllib.request.build_opener(
@@ -285,6 +297,10 @@ class OllamaReasoner:
     ) -> ResponseModelT:
         self.last_call_profile = None
         response_schema = schema.model_json_schema()
+        options: dict[str, int] = {
+            "temperature": 0,
+            "num_predict": self.max_tokens,
+        }
         payload = {
             "model": self.model,
             "messages": [
@@ -294,11 +310,10 @@ class OllamaReasoner:
             "stream": False,
             "think": False,
             "format": response_schema,
-            "options": {
-                "temperature": 0,
-                "num_predict": self.max_tokens,
-            },
+            "options": options,
         }
+        if self.context_tokens is not None:
+            options["num_ctx"] = self.context_tokens
         request = urllib.request.Request(
             f"{self.endpoint}/api/chat",
             data=_canonical_json_bytes(payload),
@@ -340,6 +355,7 @@ class OllamaReasoner:
                 user_chars=len(user),
                 schema_chars=len(_canonical_json_bytes(response_schema)),
                 max_output_tokens=self.max_tokens,
+                requested_context_tokens=self.context_tokens,
                 prompt_eval_tokens=_ollama_metric_count(
                     envelope, "prompt_eval_count"
                 ),

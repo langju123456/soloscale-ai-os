@@ -160,6 +160,7 @@ class ModelCallProfile(ContractModel):
     user_chars: int = Field(ge=0)
     schema_chars: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
+    requested_context_tokens: int | None = Field(default=None, ge=1)
     thinking_enabled: bool
     reasoning_effort: Literal["none", "low", "high", "max"] = "none"
     prompt_eval_tokens: int | None = Field(default=None, ge=0)
@@ -1396,6 +1397,7 @@ class OllamaModelGateway:
         model: str = "qwen3:8b",
         endpoint: str = "http://127.0.0.1:11434",
         reasoner: Reasoner | None = None,
+        context_tokens: int | None = None,
     ) -> None:
         selected_model = model.strip()
         if _OLLAMA_MODEL.fullmatch(selected_model) is None:
@@ -1405,6 +1407,7 @@ class OllamaModelGateway:
             model=selected_model,
             timeout=180,
             max_tokens=4096,
+            context_tokens=context_tokens,
         )
         self.descriptor = GatewayDescriptor(
             provider=ModelProviderId.OLLAMA,
@@ -1460,6 +1463,7 @@ def model_gateway_for(
     deepseek_reasoning_effort: str = "low",
     deepseek_transport: DeepSeekResponsesTransport | None = None,
     ollama_endpoint: str = "http://127.0.0.1:11434",
+    ollama_context_tokens: int | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> ModelGateway:
     """Create one explicit provider adapter without implicit fallback."""
@@ -1545,5 +1549,6 @@ def model_gateway_for(
             model=model or "qwen3:8b",
             endpoint=ollama_endpoint,
             reasoner=reasoner,
+            context_tokens=ollama_context_tokens,
         )
     raise AssertionError(f"provider factory is incomplete for {selected.value}")
