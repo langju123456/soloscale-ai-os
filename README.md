@@ -239,6 +239,9 @@ http://127.0.0.1:8765
 
 Run the engineering checks:
 
+For reproducible offline retrieval reports over the existing fixtures, see
+[Retrieval evaluation](docs/engineering/retrieval-evaluation.md).
+
 ```bash
 pytest
 ruff check .
