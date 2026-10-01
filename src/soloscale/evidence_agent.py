@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from soloscale.knowledge_models import ContentRole, RetrievalHit, SourceKind
 from soloscale.knowledge_store import KnowledgeStore
 
-PROMPT_VERSION = "evidence-agent-v3"
+PROMPT_VERSION = "evidence-agent-v4"
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _CONTEXT_EXTERNAL_ID_BYTES = 96
@@ -1078,10 +1078,14 @@ def _grounded_draft_system() -> str:
         "or more exact IDs from allowed_evidence_chunk_ids. Put every evidence-backed resume "
         "bullet in claims, never in suggested_outputs. suggested_outputs may contain only short "
         "artifact labels and must not contain facts, evidence IDs, citations, or bullet text. Put "
-        "anything not supported by those records in unsupported or open_questions. When records "
-        "conflict, retain their source attribution and record the uncertainty rather than "
-        "resolving "
-        "it. This is only "
+        "anything not supported by those records in unsupported or open_questions; use empty "
+        "arrays when there is genuinely nothing unsupported or open, and never use filler such "
+        "as 'No unsupported information', 'none', or a restatement of the question. For disputed "
+        "facts, write attributed claims such as 'source X reports ...' rather than asserting both "
+        "world states. When records are mutually exclusive, cite each relevant source and state in "
+        "unsupported or open_questions that the sources conflict and the final state cannot be "
+        "established without authoritative clarification; never silently choose a winner. This is "
+        "only "
         "a candidate for human "
         "confirmation; do not claim to update Casebook, BuildLog, GitHub, or any external system."
     )

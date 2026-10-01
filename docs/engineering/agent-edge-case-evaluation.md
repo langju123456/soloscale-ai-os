@@ -35,9 +35,10 @@ accuracy, load, P95 latency, or production stability.
 
 This slice adds a deterministic abstention draft when no retrieved evidence fits model context,
 so the agent produces empty claims and references plus an explicit information-insufficient gap
-without calling the grounded-drafting reasoner. `PROMPT_VERSION` is `evidence-agent-v3`; its
-grounded prompt asks the reasoner to preserve attribution and record uncertainty when supplied
-records conflict. It does not change result schemas or add semantic conflict resolution.
+without calling the grounded-drafting reasoner. The current `PROMPT_VERSION` is
+`evidence-agent-v4`: disputed statements must be attributed to their sources, unresolved conflicts
+must be stated explicitly, and empty gap lists must not contain filler. It does not change result
+schemas or add semantic conflict resolution.
 
 `EvidenceAgentTimeoutError` subclasses `EvidenceAgentToolError`, preserving safe failure
 receipts while distinguishing injected reasoner, search, neighbor-expansion, and citation-lineage
@@ -45,3 +46,36 @@ timeouts. There are no automatic retries or fabricated wall-clock deadlines.
 
 Validation for this slice is the focused evaluator above, `tests/test_evidence_agent.py`, Ruff,
 and strict mypy on the affected code paths.
+
+## Opt-in local-model structural run
+
+When a human has verified an already-installed loopback Ollama model, run:
+
+```bash
+.venv/bin/python scripts/evaluate_agent_live.py
+```
+
+This executes three public synthetic development cases in isolated temporary indexes and saves
+actual candidates, safe errors, model inventory identity, and call profiles under
+`.soloscale/agent-live-evals/`. It performs structural checks only; every actual answer remains
+`PENDING_HUMAN_REVIEW` for semantic quality, conflict interpretation, and usefulness.
+
+`--case` is a diagnostic subset: its receipt records `selected_structural_passed`, but marks the
+run PARTIAL and returns nonzero. Only the default completed three-case suite can set top-level
+`passed` and `full_suite_passed` to true.
+
+### Observed local run: 2026-10-01
+
+An installed `qwen3:8b` completed all three structural gates with `evidence-agent-v4`:
+empty evidence returned zero claims/references; conflicting migration records retained both
+citations and explicitly stated their disagreement; a 700-byte UTF-8 context preserved the
+critical tail statement and its citation. The run made eight local model completions.
+
+The v3 baseline had repeated the conflict question as a gap and emitted a no-gap filler.
+The v4 run expressed the conflict explicitly. These are qualitative observations on three
+curated development cases; the answers remain candidates requiring human review, and no
+general semantic accuracy or production reliability result is inferred.
+
+The long-context candidate also listed unspecified implementation details as unsupported.
+Whether that gap is useful for an identifier-only question remains a qualitative review item;
+the structural gate does not assess gap wording or prove complete prompt compliance.
