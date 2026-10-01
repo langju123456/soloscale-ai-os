@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
-from types import SimpleNamespace
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 from pytest import MonkeyPatch
 
-import scripts.evaluate_agent_live as live_evaluation
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPT_PATH = _REPOSITORY_ROOT / "scripts" / "evaluate_agent_live.py"
+
+
+def _load_live_evaluation() -> ModuleType:
+    specification = importlib.util.spec_from_file_location("evaluate_agent_live", _SCRIPT_PATH)
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+live_evaluation = _load_live_evaluation()
 
 
 def test_fixture_expands_utf8_repeat_and_keeps_three_synthetic_cases() -> None:
