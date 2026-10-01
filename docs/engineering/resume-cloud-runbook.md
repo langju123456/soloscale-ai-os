@@ -9,3 +9,8 @@ Run the API with `python -m soloscale.resume_cloud_api` and a worker with `pytho
 After the API and worker are running, `RESUME_CLOUD_BEARER_TOKEN=... python scripts/demo_resume_cloud.py` exercises the full flow with a synthetic template-only resume and checks that the returned file is DOCX data.
 
 The worker claims with `FOR UPDATE SKIP LOCKED`, permits one attempt, and writes a token before generation. A lease-expired RUNNING task becomes `NEEDS_REVIEW` and is never requeued, because a paid provider may have received the call. Terminal cleanup clears inputs; output also expires. Logs carry task IDs/state and exception types only.
+
+## Synthetic evaluator
+
+For the isolated local concurrency and recovery harness, see
+[Resume service evaluation](resume-service-evaluation.md).
