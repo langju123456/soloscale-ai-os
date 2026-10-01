@@ -240,7 +240,8 @@ http://127.0.0.1:8765
 Run the engineering checks:
 
 For reproducible offline retrieval reports over the existing fixtures, see
-[Retrieval evaluation](docs/engineering/retrieval-evaluation.md).
+[Retrieval evaluation](docs/engineering/retrieval-evaluation.md). For synthetic Evidence Agent
+fault-path coverage, see [Agent edge-case evaluation](docs/engineering/agent-edge-case-evaluation.md).
 
 ```bash
 pytest

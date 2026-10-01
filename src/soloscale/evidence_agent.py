@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from soloscale.knowledge_models import ContentRole, RetrievalHit, SourceKind
 from soloscale.knowledge_store import KnowledgeStore
 
-PROMPT_VERSION = "evidence-agent-v2"
+PROMPT_VERSION = "evidence-agent-v3"
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _CONTEXT_EXTERNAL_ID_BYTES = 96
@@ -85,6 +85,10 @@ class EvidenceAgentContractError(EvidenceAgentError):
 
 class EvidenceAgentToolError(EvidenceAgentError):
     """Raised when the one allowed retrieval tool fails."""
+
+
+class EvidenceAgentTimeoutError(EvidenceAgentToolError):
+    """Raised when a bounded reasoner or retrieval operation times out."""
 
 
 class EvidenceAgentArtifactError(EvidenceAgentError):
@@ -681,18 +685,32 @@ class BoundedEvidenceAgent:
             )
             self._write_artifact(run_dir, "03_retrieval_manifest.json", retrieval_manifest)
 
-            draft = self._reason(
-                GroundedDraft,
-                stage="grounded drafting",
-                system=_grounded_draft_system(),
-                user=_json_text(
-                    {
-                        "question": normalized_question,
-                        "allowed_evidence_chunk_ids": context_ids,
-                        "evidence_records": json.loads(context_text),
-                    }
-                ),
-            )
+            if context_ids:
+                draft = self._reason(
+                    GroundedDraft,
+                    stage="grounded drafting",
+                    system=_grounded_draft_system(),
+                    user=_json_text(
+                        {
+                            "question": normalized_question,
+                            "allowed_evidence_chunk_ids": context_ids,
+                            "evidence_records": json.loads(context_text),
+                        }
+                    ),
+                )
+            else:
+                draft = GroundedDraft(
+                    claims=[],
+                    unsupported=[
+                        (
+                            "Information is insufficient: no retrieved evidence fit the "
+                            "grounded-draft context."
+                        )
+                    ],
+                    open_questions=[],
+                    suggested_case_title=None,
+                    suggested_outputs=[],
+                )
             self._validate_draft(draft, allowed_chunk_ids=set(context_ids))
             cited_ids = _ordered_cited_ids(draft.claims)
             self._validate_current_citations(cited_ids, context_by_id)
@@ -751,6 +769,8 @@ class BoundedEvidenceAgent:
     ) -> ResponseModelT:
         try:
             return self.reasoner.complete(schema, system=system, user=user)
+        except ReasonerTimeoutError:
+            raise EvidenceAgentTimeoutError(f"reasoner timed out during {stage}") from None
         except ReasonerTransportError:
             raise EvidenceAgentToolError(f"reasoner transport failed during {stage}") from None
         except ReasonerInvalidResponseError:
@@ -773,6 +793,8 @@ class BoundedEvidenceAgent:
     ) -> list[RetrievalHit]:
         try:
             return list(self.store.search(query, limit=limit, source_kinds=source_kinds))
+        except TimeoutError:
+            raise EvidenceAgentTimeoutError("knowledge search timed out") from None
         except Exception:
             raise EvidenceAgentToolError("knowledge search failed") from None
 
@@ -790,6 +812,8 @@ class BoundedEvidenceAgent:
                 known_by_id[primary.chunk_id] = primary
             try:
                 neighbors = self.store.get_neighbors([primary.chunk_id], radius=1)
+            except TimeoutError:
+                raise EvidenceAgentTimeoutError("knowledge neighbor expansion timed out") from None
             except Exception:
                 raise EvidenceAgentToolError("knowledge neighbor expansion failed") from None
             for hit in neighbors:
@@ -822,6 +846,8 @@ class BoundedEvidenceAgent:
             return
         try:
             current = self.store.get_chunks(cited_ids)
+        except TimeoutError:
+            raise EvidenceAgentTimeoutError("citation lineage verification timed out") from None
         except Exception:
             raise EvidenceAgentToolError("citation lineage verification failed") from None
         current_by_id = {hit.chunk_id: hit for hit in current}
@@ -1052,7 +1078,10 @@ def _grounded_draft_system() -> str:
         "or more exact IDs from allowed_evidence_chunk_ids. Put every evidence-backed resume "
         "bullet in claims, never in suggested_outputs. suggested_outputs may contain only short "
         "artifact labels and must not contain facts, evidence IDs, citations, or bullet text. Put "
-        "anything not supported by those records in unsupported or open_questions. This is only "
+        "anything not supported by those records in unsupported or open_questions. When records "
+        "conflict, retain their source attribution and record the uncertainty rather than "
+        "resolving "
+        "it. This is only "
         "a candidate for human "
         "confirmation; do not claim to update Casebook, BuildLog, GitHub, or any external system."
     )

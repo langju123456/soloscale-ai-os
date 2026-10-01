@@ -1141,8 +1141,11 @@ def test_low_evidence_returns_only_unsupported_and_open_questions(tmp_path: Path
     assert result.claims == []
     assert result.refs == []
     assert "No evidence-backed claim" in result.answer
-    assert "The requested outcome cannot be established." in result.unsupported
+    assert result.unsupported == [
+        "Information is insufficient: no retrieved evidence fit the grounded-draft context."
+    ]
     assert any("No retrieved evidence" in item for item in result.limitations)
+    assert len(reasoner.calls) == 2
 
 
 def test_unknown_evidence_reference_fails_closed_and_writes_safe_failure(
