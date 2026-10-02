@@ -27,7 +27,7 @@ outcome gate and prompt. Human semantic review is still necessary: schema validi
 source IDs, and the 25% text-change proxy do not establish truth or usefulness.
 Private operator input/output bodies and model prompts are excluded from this repo.
 
-The repaired gate passed 719 local tests with the same 10 explicit skips, Ruff, strict
+The repaired gate passed 720 local tests with the same 10 explicit skips, Ruff, strict
 mypy and package builds. The [sanitized real Chinese evaluation](../evidence/2026-10-02-chinese-resume-closeout.json)
 records three bounded localhost qwen3:8b attempts (zero paid calls), two substantive
 source-supported edits in the final candidate, and one-page native Pages/PDF visual

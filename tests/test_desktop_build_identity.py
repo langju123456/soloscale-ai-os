@@ -92,9 +92,44 @@ def test_build_identity_is_derived_from_the_exact_worktree() -> None:
     assert identity["build_kind"] == "development"
     assert identity["bundle_identifier"] == "local.soloscale.desktop.dev"
     assert identity["display_name"] == "SoloScale AI OS Dev"
-    assert identity["git_branch"] == _git_output("branch", "--show-current")
+    # PR checkouts are detached; the build contract labels the absent branch,
+    # while retaining the exact commit and dirty state.
+    assert identity["git_branch"] == (_git_output("branch", "--show-current") or "unknown")
     assert identity["git_commit"] == _git_output("rev-parse", "HEAD")
     assert identity["git_dirty"] == _git_dirty()
+
+
+def test_detached_build_identity_preserves_exact_commit_and_clean_state(tmp_path: Path) -> None:
+    repository = tmp_path / "detached-source"
+    script = repository / "scripts" / BUILD_SCRIPT.name
+    script.parent.mkdir(parents=True)
+    shutil.copy2(BUILD_SCRIPT, script)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "add", "scripts"], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=SoloScale Test",
+            "-c", "user.email=soloscale@example.com", "commit", "-qm", "identity fixture",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+    ).strip()
+    subprocess.run(["git", "checkout", "--detach", "-q", commit], cwd=repository, check=True)
+    result = subprocess.run(
+        ["bash", str(script), "--print-build-identity"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    identity = dict(line.split("=", 1) for line in result.stdout.splitlines())
+    assert identity["git_branch"] == "unknown"
+    assert identity["git_commit"] == commit
+    assert len(identity["git_commit"]) == 40
+    assert identity["git_dirty"] == "false"
 
 
 def test_app_build_refuses_a_dirty_or_uncommitted_source_tree(tmp_path: Path) -> None:

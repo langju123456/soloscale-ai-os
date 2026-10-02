@@ -21,7 +21,7 @@ future publication, paid calls, or credential changes automatic.
       two substantive project edits, no unsupported fact/ownership/outcome,
       same source identity, readable rendered DOCX. Export or a text-change
       score alone is insufficient. Final application use remains human-approved.
-- [x] Release checks: 719 passed / 10 skipped, Ruff, strict mypy and wheel/sdist;
+- [x] Release checks: 720 passed / 10 skipped, Ruff, strict mypy and wheel/sdist;
       public-safe diff review excludes private model input/output bodies.
 
 ## Release execution gates

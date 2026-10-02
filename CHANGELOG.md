@@ -12,6 +12,8 @@ All notable changes will be documented here.
   fall back to the source slot. This bounded lexical gate still requires human
   semantic review.
 - Python package, desktop metadata, and build defaults agree on 0.4.2 / build 9.
+- Desktop identity tests cover detached PR checkouts: an absent branch is `unknown`,
+  while the full commit and clean/dirty state must still match the worktree.
 
 ### Changed
 
