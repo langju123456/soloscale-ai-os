@@ -12,11 +12,13 @@ import json
 import re
 import time
 import zipfile
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 from xml.etree import ElementTree
 
 from pydantic import (
@@ -31,6 +33,7 @@ from pydantic import (
 from soloscale.model_gateway import ModelCallProfile, ModelGateway
 from soloscale.resume_evidence_pack import (
     build_candidate_evidence_pack,
+    build_composition_evidence_plan,
     build_jd_positioning_brief,
     deterministic_hiring_signals,
 )
@@ -103,6 +106,7 @@ _CANONICAL_SECTION_HEADINGS = {
     "项目经历": "PROJECT HIGHLIGHTS",
     "教育": "EDUCATION",
     "教育经历": "EDUCATION",
+    "教育背景": "EDUCATION",
     "技能": "TECHNICAL SKILLS",
     "技术技能": "TECHNICAL SKILLS",
     "专业技能": "TECHNICAL SKILLS",
@@ -136,6 +140,26 @@ _STOP_WORDS = {
     "you",
     "your",
 }
+
+_ZH_RESUME_EDITOR_SYSTEM_PROMPT = (
+    "你是中国大陆 AI 工程师简历编辑。依据本次 JD 和 candidate_profile 中已获批的不可变事实，"
+    "编辑一页中文简历，让招聘者看懂相关的实际工作；只返回给定 JSON Schema。\n"
+    "可自然压缩、组合和重排重点，不要求保留每项细节或逐词对应。至少两条相关项目"
+    "bullet 要实质改写：从来源选择相关问题、机制或验证工作开头，再组织方法和"
+    "已有依据。不要仅替换实现、构建、开发等动词或调整标点；可删非关键细节。"
+    "没有效果证据只写机制和验证，不写提升准确性、提高效率、确保完整性。"
+    "不编造或扩大技术、数字、项目/客户归属、职责、规模、结果或因果；不把参与"
+    "写成主导、本地验证写成生产部署。事实不可变，措辞可变；采用的技术名、分隔符、"
+    "数字须保持原样。__SS_PRIVATE_*__ 占位符原样保留。\n"
+    "PROFILE key 绑定原始履历，不能按 evidence_priority 重新编号或移动内容。"
+    "每个 key 填 text、kind、target_fact_id、supporting_fact_ids："
+    "target_fact_id 必须属于该 key；supporting_fact_ids 只能引用已获批事实。"
+    "单一来源用 REWRITE；表达至少两个事实真实成分时才用 SYNTHESIS。"
+    "evidence_priority 和 skill_priority 各包含全部标识一次。\n"
+    "summary_rewrite 仅在至少两事实支持时填，否则 null。unsupported_requirements"
+    "只引用缺乏事实支持的能力要求原句；公司、职位、地点、年限、链接和标题不是"
+    "能力缺口。positioning_brief 和招聘信号只供定位，不复述。简洁专业中文。招聘信号：\n"
+)
 
 
 class ResumeValidationRuleCode(StrEnum):
@@ -175,6 +199,24 @@ class ResumeValidationFailure:
 
 
 @dataclass(frozen=True)
+class ResumeEditorialReviewWarning:
+    """A non-blocking Chinese editorial claim that requires human review."""
+
+    code: Literal["LEXICAL_ANCHOR_NOT_CONFIRMED"]
+    claim_id: str
+    json_path: str
+    fact_id: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "claim_id": self.claim_id,
+            "json_path": self.json_path,
+            "fact_id": self.fact_id,
+        }
+
+
+@dataclass(frozen=True)
 class ResumeValidationDiagnostics:
     failures: tuple[ResumeValidationFailure, ...]
     candidate_count: int
@@ -184,13 +226,15 @@ class ResumeValidationDiagnostics:
     duplicate_count: int
     source_span_failure_count: int
     validator_status: str = "rejected"
+    editorial_warnings: tuple[ResumeEditorialReviewWarning, ...] = ()
+    unverified_count: int = 0
 
     @property
     def failure_count(self) -> int:
         return len(self.failures)
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "validator_status": self.validator_status,
             "failure_count": self.failure_count,
             "failures": [failure.as_dict() for failure in self.failures],
@@ -200,7 +244,13 @@ class ResumeValidationDiagnostics:
             "rejected_count": self.rejected_count,
             "duplicate_count": self.duplicate_count,
             "source_span_failure_count": self.source_span_failure_count,
+            "unverified_count": self.unverified_count,
         }
+        if self.editorial_warnings:
+            result["editorial_warnings"] = [
+                warning.as_dict() for warning in self.editorial_warnings
+            ]
+        return result
 
 
 class ResumeTemplateError(ValueError):
@@ -232,6 +282,7 @@ class TailoredDocx:
     source_paragraph_count: int
     claims_preserved: bool
     grounded_rewrites: int = 0
+    unverified_rewrites: int = 0
     synthesized_rewrites: int = 0
     summary_rewritten: bool = False
     rejected_rewrites: int = 0
@@ -242,6 +293,7 @@ class TailoredDocx:
     model_call_profile: dict[str, object] | None = None
     validation_diagnostics: ResumeValidationDiagnostics | None = None
     role_strategy: RoleStrategy | None = None
+    rendered_profile_entry_ids: tuple[str, ...] = ()
     candidate_evidence_pack: CandidateEvidencePack | None = None
     positioning_brief: JDPositioningBrief | None = None
     evidence_retrieval_trace: ResumeEvidenceRetrievalTrace | None = None
@@ -254,6 +306,9 @@ class TailoredDocx:
     expert_rewrites: int = 0
     expert_provider: str | None = None
     expert_model: str | None = None
+    requested_edit_profile_entry_ids: tuple[str, ...] = ()
+    requested_project_material_rewrites: int = 0
+    requested_project_rewrite_quality_status: str = "NOT_APPLICABLE"
 
 
 def _paragraph_text(paragraph: ElementTree.Element) -> str:
@@ -282,7 +337,10 @@ def _remove_trailing_empty_paragraphs(body: ElementTree.Element) -> int:
 
 def _is_bullet(paragraph: ElementTree.Element) -> bool:
     properties = paragraph.find(f"{_W}pPr")
-    return properties is not None and properties.find(f"{_W}numPr") is not None
+    return (
+        (properties is not None and properties.find(f"{_W}numPr") is not None)
+        or _paragraph_text(paragraph).startswith("•")
+    )
 
 
 def _validate_member(info: zipfile.ZipInfo) -> None:
@@ -485,7 +543,7 @@ def extract_candidate_profile(template: bytes) -> CandidateProfile:
         full_name=identity[0] if identity else None,
         headline=identity[1] if len(identity) > 1 else None,
         summary=summary[0] if summary else None,
-        skills=[paragraph.text for paragraph in skills if paragraph.text and paragraph.is_bullet],
+        skills=_nonblank_text(skills),
         project_bullets=[
             paragraph.text for paragraph in projects if paragraph.text and paragraph.is_bullet
         ],
@@ -550,6 +608,35 @@ def _replace_range(
         body.insert(start + offset, child)
 
 
+def _project_blocks(
+    section: list[ElementTree.Element],
+) -> tuple[list[ElementTree.Element], list[list[ElementTree.Element]]]:
+    """Keep each project's heading, description, and bullets as one movable block."""
+
+    prefix: list[ElementTree.Element] = []
+    blocks: list[list[ElementTree.Element]] = []
+    current: list[ElementTree.Element] = []
+    for child in section:
+        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
+        starts_next_project = (
+            text
+            and not _is_bullet(child)
+            and any(_is_bullet(item) for item in current)
+        )
+        if starts_next_project:
+            blocks.append(current)
+            current = [child]
+        elif current:
+            current.append(child)
+        elif text and not _is_bullet(child):
+            current = [child]
+        else:
+            prefix.append(child)
+    if current:
+        blocks.append(current)
+    return prefix, blocks
+
+
 def _reorder_project_blocks(
     body: ElementTree.Element, children: list[ElementTree.Element], job_terms: set[str]
 ) -> int:
@@ -558,21 +645,7 @@ def _reorder_project_blocks(
         return 0
     start, end = bounds
     section = children[start:end]
-    prefix: list[ElementTree.Element] = []
-    blocks: list[list[ElementTree.Element]] = []
-    current: list[ElementTree.Element] = []
-    for child in section:
-        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
-        if text and not _is_bullet(child):
-            if current:
-                blocks.append(current)
-            current = [child]
-        elif current:
-            current.append(child)
-        else:
-            prefix.append(child)
-    if current:
-        blocks.append(current)
+    prefix, blocks = _project_blocks(section)
     if len(blocks) < 2:
         return 0
     ranked = sorted(
@@ -589,6 +662,14 @@ def _reorder_project_blocks(
     return reordered_count
 
 
+def _skill_line_positions(section: list[ElementTree.Element]) -> list[int]:
+    return [
+        index
+        for index, child in enumerate(section)
+        if child.tag == f"{_W}p" and _paragraph_text(child)
+    ]
+
+
 def _reorder_skill_bullets(
     body: ElementTree.Element, children: list[ElementTree.Element], job_terms: set[str]
 ) -> int:
@@ -597,10 +678,10 @@ def _reorder_skill_bullets(
         return 0
     start, end = bounds
     section = children[start:end]
-    bullet_positions = [index for index, child in enumerate(section) if _is_bullet(child)]
-    if len(bullet_positions) < 2:
+    skill_positions = _skill_line_positions(section)
+    if len(skill_positions) < 2:
         return 0
-    bullets = [section[index] for index in bullet_positions]
+    bullets = [section[index] for index in skill_positions]
     ranked = sorted(
         enumerate(bullets),
         key=lambda item: (-_score(_paragraph_text(item[1]), job_terms), item[0]),
@@ -608,7 +689,7 @@ def _reorder_skill_bullets(
     reordered_count = sum(index != original for index, (original, _) in enumerate(ranked))
     if reordered_count:
         replacement = list(section)
-        for position, (_, bullet) in zip(bullet_positions, ranked, strict=True):
+        for position, (_, bullet) in zip(skill_positions, ranked, strict=True):
             replacement[position] = bullet
         _replace_range(body, start, end, replacement)
     return reordered_count
@@ -616,22 +697,70 @@ def _reorder_skill_bullets(
 
 def _profile_entries(profile: CandidateProfile) -> dict[str, str]:
     claims = profile.experience_bullets + profile.project_bullets
-    if len(set(claims)) != len(claims):
-        raise ResumeTemplateError(
-            "AI tailoring requires each approved resume bullet to have unique text"
-        )
     return {f"PROFILE-{index:02d}": text for index, text in enumerate(claims, start=1)}
 
 
 def _profile_skills(profile: CandidateProfile) -> dict[str, str]:
-    if len(set(profile.skills)) != len(profile.skills):
-        raise ResumeTemplateError(
-            "AI tailoring requires each approved skill line to have unique text"
-        )
     return {
         f"SKILL-{index:02d}": text
         for index, text in enumerate(profile.skills, start=1)
     }
+
+
+def _section_bullet_elements(
+    body: ElementTree.Element, heading: str
+) -> list[ElementTree.Element]:
+    children = list(body)
+    bounds = _section_bounds(children, heading)
+    if bounds is None:
+        return []
+    start, end = bounds
+    return [
+        child
+        for child in children[start:end]
+        if child.tag == f"{_W}p" and _is_bullet(child) and _paragraph_text(child)
+    ]
+
+
+def _profile_entry_elements(
+    body: ElementTree.Element, profile: CandidateProfile
+) -> dict[str, ElementTree.Element]:
+    """Bind positional PROFILE identities before any DOCX reordering or rewriting."""
+
+    result: dict[str, ElementTree.Element] = {}
+    next_index = 1
+    for heading, expected_texts in (
+        ("WORK EXPERIENCE", profile.experience_bullets),
+        ("PROJECT HIGHLIGHTS", profile.project_bullets),
+    ):
+        elements = _section_bullet_elements(body, heading)
+        if [_paragraph_text(element) for element in elements] != expected_texts:
+            raise ResumeTemplateError(
+                "Approved profile entries do not map positionally to the DOCX"
+            )
+        for element in elements:
+            result[f"PROFILE-{next_index:02d}"] = element
+            next_index += 1
+    return result
+
+
+def _rendered_profile_entry_ids(
+    body: ElementTree.Element,
+    entry_elements: dict[str, ElementTree.Element],
+) -> tuple[str, ...]:
+    """Record the post-reorder paragraph order for later expert patch application."""
+
+    identity_by_element = {
+        element: entry_id for entry_id, element in entry_elements.items()
+    }
+    rendered = tuple(
+        identity_by_element[element]
+        for heading in ("WORK EXPERIENCE", "PROJECT HIGHLIGHTS")
+        for element in _section_bullet_elements(body, heading)
+    )
+    if len(rendered) != len(entry_elements) or set(rendered) != set(entry_elements):
+        raise ResumeTemplateError("Rendered profile identities do not match the DOCX")
+    return rendered
 
 
 def _exact_priority_validator(
@@ -664,6 +793,17 @@ def _allowed_id_list_validator(
     return validate
 
 
+def _allowed_id_validator(allowed_values: tuple[str, ...]) -> Callable[[str], str]:
+    allowed = frozenset(allowed_values)
+
+    def validate(value: str) -> str:
+        if value not in allowed:
+            raise ValueError("referenced identity must be an approved request ID")
+        return value
+
+    return validate
+
+
 class _ExactRoleStrategyResponse(BaseModel):
     """Current wire contract with one ignored legacy model-authored field."""
 
@@ -685,8 +825,13 @@ def _exact_role_strategy_model(
     skill_ids: list[str],
     fact_ids: list[str],
     include_summary: bool,
+    requested_edit_ids: tuple[str, ...] | None = None,
 ) -> type[BaseModel]:
     """Build a request-specific schema whose rewrite keys cannot be omitted."""
+
+    rewrite_entry_ids = list(requested_edit_ids or entry_ids)
+    if not rewrite_entry_ids or not set(rewrite_entry_ids) <= set(entry_ids):
+        raise ValueError("Requested rewrite identities must be approved profile entries")
 
     evidence_schema_extra: dict[str, Any] = {
         "items": {"enum": entry_ids, "type": "string"},
@@ -704,25 +849,69 @@ def _exact_role_strategy_model(
         "items": {"enum": fact_ids, "type": "string"},
         "uniqueItems": True,
     }
-    rewrite_body = create_model(
-        "GroundedRewriteBody",
-        __config__=ConfigDict(extra="forbid"),
-        kind=(Literal["REWRITE", "SYNTHESIS"], ...),
-        text=(str, Field(min_length=1, max_length=600)),
-        source_fact_ids=(
-            Annotated[
-                list[str],
-                AfterValidator(
-                    _allowed_id_list_validator(tuple(fact_ids), minimum=1)
-                ),
-            ],
-            Field(
-                min_length=1,
-                max_length=32,
-                json_schema_extra=source_fact_id_schema,
+    def rewrite_body_for(entry_id: str) -> type[BaseModel]:
+        target_fact_ids = tuple(
+            fact_id
+            for fact_id in fact_ids
+            if fact_id.startswith(f"FACT-{entry_id}-")
+        )
+
+        class _LegacyGroundedRewriteWireBody(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            @model_validator(mode="before")
+            @classmethod
+            def adapt_legacy_source_fact_ids(cls, value: object) -> object:
+                if not isinstance(value, dict) or "source_fact_ids" not in value:
+                    return value
+                source_fact_ids = value.get("source_fact_ids")
+                if not isinstance(source_fact_ids, list) or not source_fact_ids:
+                    return value
+                target_fact_id = next(
+                    (
+                        fact_id
+                        for fact_id in source_fact_ids
+                        if fact_id in target_fact_ids
+                    ),
+                    None,
+                )
+                if target_fact_id is None:
+                    return value
+                adapted = dict(value)
+                adapted.pop("source_fact_ids", None)
+                adapted.setdefault("target_fact_id", target_fact_id)
+                adapted.setdefault(
+                    "supporting_fact_ids",
+                    [fact_id for fact_id in source_fact_ids if fact_id != target_fact_id],
+                )
+                return adapted
+
+        return create_model(
+            f"GroundedRewriteBody_{entry_id.replace('-', '_')}",
+            __base__=_LegacyGroundedRewriteWireBody,
+            kind=(Literal["REWRITE", "SYNTHESIS"], ...),
+            text=(str, Field(min_length=1, max_length=600)),
+            target_fact_id=(
+                Annotated[
+                    str,
+                    AfterValidator(
+                        _allowed_id_validator(target_fact_ids)
+                    ),
+                ],
+                Field(json_schema_extra={"enum": list(target_fact_ids), "type": "string"}),
             ),
-        ),
-    )
+            supporting_fact_ids=(
+                Annotated[
+                    list[str],
+                    AfterValidator(_allowed_id_list_validator(tuple(fact_ids), minimum=0)),
+                ],
+                Field(
+                    default_factory=list,
+                    max_length=31,
+                    json_schema_extra=source_fact_id_schema,
+                ),
+            ),
+        )
     summary_body = create_model(
         "GroundedSummaryBody",
         __config__=ConfigDict(extra="forbid"),
@@ -742,7 +931,7 @@ def _exact_role_strategy_model(
         ),
     )
     rewrite_fields: dict[str, Any] = {
-        entry_id: (rewrite_body, ...) for entry_id in entry_ids
+        entry_id: (rewrite_body_for(entry_id), ...) for entry_id in rewrite_entry_ids
     }
     rewrite_map = create_model(
         "ExactBulletRewrites",
@@ -803,26 +992,64 @@ def _role_strategy_from_exact(
     sanitized_skill_by_id: dict[str, str],
     fact_source_by_id: dict[str, str],
     top_hiring_signals: list[str],
+    source_entries: dict[str, str] | None = None,
+    requested_edit_ids: tuple[str, ...] | None = None,
 ) -> RoleStrategy:
     payload = response.model_dump(mode="json")
     payload["top_hiring_signals"] = top_hiring_signals
     rewrite_map = payload.pop("bullet_rewrites", None)
     if not isinstance(rewrite_map, dict):
         raise ResumeTemplateError("AI role strategy returned an invalid rewrite map")
+    requested_ids = set(requested_edit_ids or entry_ids)
+    if not requested_ids <= set(entry_ids):
+        raise ResumeTemplateError("AI role strategy requested an unknown profile entry")
+    own_fact_ids = {
+        entry_id: [
+            fact_id
+            for fact_id, source_id in fact_source_by_id.items()
+            if source_id == entry_id
+        ]
+        for entry_id in entry_ids
+    }
     rewrites: list[dict[str, object]] = []
     for entry_id in entry_ids:
         body = rewrite_map.get(entry_id)
+        if entry_id not in requested_ids:
+            if body is not None:
+                raise ResumeTemplateError(
+                    "AI role strategy returned an unrequested profile rewrite"
+                )
+            if (
+                source_entries is None
+                or entry_id not in source_entries
+                or not own_fact_ids[entry_id]
+            ):
+                raise ResumeTemplateError("Approved profile entry lacks a source fact")
+            rewrites.append(
+                {
+                    "profile_entry_id": entry_id,
+                    "kind": "REWRITE",
+                    "text": source_entries[entry_id],
+                    "source_profile_entry_ids": [entry_id],
+                    "source_fact_ids": [own_fact_ids[entry_id][0]],
+                }
+            )
+            continue
         if not isinstance(body, dict):
             raise ResumeTemplateError(
                 "AI role strategy omitted an approved profile entry"
             )
-        fact_ids = body.get("source_fact_ids")
-        if not isinstance(fact_ids, list) or any(
-            not isinstance(value, str) for value in fact_ids
+        target_fact_id = body.get("target_fact_id")
+        supporting_fact_ids = body.get("supporting_fact_ids")
+        if not isinstance(target_fact_id, str) or not isinstance(
+            supporting_fact_ids, list
+        ) or any(
+            not isinstance(value, str) for value in supporting_fact_ids
         ):
             raise ResumeTemplateError(
                 "AI role strategy returned invalid atomic fact references"
             )
+        fact_ids = list(dict.fromkeys([target_fact_id, *supporting_fact_ids]))
         try:
             source_ids = list(
                 dict.fromkeys(fact_source_by_id[fact_id] for fact_id in fact_ids)
@@ -831,8 +1058,21 @@ def _role_strategy_from_exact(
             raise ResumeTemplateError(
                 "AI role strategy referenced an unknown atomic fact"
             ) from error
-        body["source_profile_entry_ids"] = source_ids
-        rewrites.append({"profile_entry_id": entry_id, **body})
+        if (
+            body.get("kind") == "SYNTHESIS"
+            and len(fact_ids) == 1
+            and source_ids == [entry_id]
+        ):
+            body["kind"] = "REWRITE"
+        rewrites.append(
+            {
+                "profile_entry_id": entry_id,
+                "kind": body.get("kind"),
+                "text": body.get("text"),
+                "source_profile_entry_ids": source_ids,
+                "source_fact_ids": fact_ids,
+            }
+        )
     payload["bullet_rewrites"] = rewrites
     skill_priority = payload.get("skill_priority")
     if not isinstance(skill_priority, list) or any(
@@ -867,6 +1107,46 @@ def _role_strategy_from_exact(
                 "AI role strategy referenced an unknown Summary atomic fact"
             ) from error
     return RoleStrategy.model_validate(payload)
+
+
+def _focused_project_edit_ids(
+    profile: CandidateProfile,
+    *,
+    entry_ids: list[str],
+    fact_source_by_id: dict[str, str],
+    prioritized_fact_ids: list[str],
+    output_locale: Literal["en-US", "zh-CN"],
+) -> tuple[str, ...]:
+    """Choose two Chinese project slots from deterministic fact priority only."""
+
+    if output_locale != "zh-CN" or len(profile.project_bullets) < 2:
+        return ()
+    project_ids = entry_ids[len(profile.experience_bullets) :]
+    selected: list[str] = []
+    for fact_id in prioritized_fact_ids:
+        entry_id = fact_source_by_id.get(fact_id)
+        if entry_id in project_ids and entry_id not in selected:
+            selected.append(entry_id)
+        if len(selected) == 2:
+            return tuple(selected)
+    for entry_id in project_ids:
+        if entry_id not in selected:
+            selected.append(entry_id)
+        if len(selected) == 2:
+            break
+    return tuple(selected)
+
+
+def _is_material_requested_project_rewrite(source: str, rewritten: str) -> bool:
+    """A deterministic 25%-change text proxy, not proof of semantic quality."""
+
+    source_tokens = "".join(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", source)).casefold()
+    rewritten_tokens = "".join(
+        re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", rewritten)
+    ).casefold()
+    if source_tokens == rewritten_tokens or min(len(source_tokens), len(rewritten_tokens)) < 8:
+        return False
+    return SequenceMatcher(None, source_tokens, rewritten_tokens).ratio() <= 0.75
 
 
 _HIRING_SIGNAL_HEADINGS = {
@@ -982,7 +1262,10 @@ _ZH_INFLATION_TERMS: tuple[
         ResumeValidationRuleCode.CLAIM_SCALE_INFLATION,
     ),
     (
-        ("显著提升", "大幅提升", "大幅降低", "收入增长", "节省成本"),
+        (
+            "提升", "提高", "显著提升", "大幅提升", "大幅降低", "收入增长", "节省成本",
+            "确保数据完整性", "确保数据一致性",
+        ),
         ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION,
     ),
 )
@@ -1019,6 +1302,13 @@ def _fact_anchor_terms(text: str) -> set[str]:
     terms = _terms(text)
     anchors = terms - _FACT_ACTION_TERMS - _GENERIC_JD_TERMS
     return anchors or terms
+
+
+def _exact_profile_fact_identity(text: str) -> str:
+    """Normalize the one source-preserving identity accepted by the anchor gate."""
+
+    compact = "".join(text.split())
+    return compact.removeprefix("•")
 
 
 def _cross_locale_fact_match(
@@ -1093,6 +1383,7 @@ def _duplicate_indices(values: list[str], *, casefold: bool = False) -> list[int
     return duplicates
 
 
+@overload
 def _validate_role_strategy(
     strategy: RoleStrategy,
     *,
@@ -1100,7 +1391,31 @@ def _validate_role_strategy(
     job_description: str,
     atomic_facts: list[ResumeAtomicFact] | None = None,
     output_locale: Literal["en-US", "zh-CN"] = "en-US",
-) -> dict[str, str]:
+    return_editorial_warnings: Literal[True],
+) -> tuple[dict[str, str], tuple[ResumeEditorialReviewWarning, ...]]: ...
+
+
+@overload
+def _validate_role_strategy(
+    strategy: RoleStrategy,
+    *,
+    profile: CandidateProfile,
+    job_description: str,
+    atomic_facts: list[ResumeAtomicFact] | None = None,
+    output_locale: Literal["en-US", "zh-CN"] = "en-US",
+    return_editorial_warnings: Literal[False] = False,
+) -> dict[str, str]: ...
+
+
+def _validate_role_strategy(
+    strategy: RoleStrategy,
+    *,
+    profile: CandidateProfile,
+    job_description: str,
+    atomic_facts: list[ResumeAtomicFact] | None = None,
+    output_locale: Literal["en-US", "zh-CN"] = "en-US",
+    return_editorial_warnings: bool = False,
+) -> dict[str, str] | tuple[dict[str, str], tuple[ResumeEditorialReviewWarning, ...]]:
     entries = _profile_entries(profile)
     atomic_fact_by_id = {
         item.fact_id: item
@@ -1108,6 +1423,7 @@ def _validate_role_strategy(
     }
     expected_ids = set(entries)
     failures: list[ResumeValidationFailure] = []
+    editorial_warnings: list[ResumeEditorialReviewWarning] = []
     claim_failure_ids: set[str] = set()
     duplicate_count = 0
     source_span_failure_count = 0
@@ -1135,6 +1451,18 @@ def _validate_role_strategy(
         if source_span:
             source_span_failure_count += 1
 
+    def warn_lexical_anchor(
+        *, json_path: str, claim_id: str, fact_id: str
+    ) -> None:
+        editorial_warnings.append(
+            ResumeEditorialReviewWarning(
+                code="LEXICAL_ANCHOR_NOT_CONFIRMED",
+                claim_id=claim_id,
+                json_path=json_path,
+                fact_id=fact_id,
+            )
+        )
+
     for index in _duplicate_indices(strategy.evidence_priority):
         evidence_id = strategy.evidence_priority[index]
         reject(
@@ -1150,14 +1478,7 @@ def _validate_role_strategy(
         )
         claim_failure_ids.update(expected_ids - set(strategy.evidence_priority))
 
-    expected_skills = set(profile.skills)
-    for index in _duplicate_indices(strategy.skill_priority):
-        reject(
-            ResumeValidationRuleCode.OUTPUT_DUPLICATE,
-            f"$.skill_priority[{index}]",
-            duplicate=True,
-        )
-    if set(strategy.skill_priority) != expected_skills:
+    if Counter(strategy.skill_priority) != Counter(profile.skills):
         reject(
             ResumeValidationRuleCode.OUTPUT_SCHEMA_INVALID,
             "$.skill_priority",
@@ -1232,6 +1553,11 @@ def _validate_role_strategy(
                 )
                 break
         for fact in resolved_facts:
+            exact_profile_fact_identity_match = (
+                fact.source_kind == "PROFILE_ENTRY"
+                and _exact_profile_fact_identity(fact.text)
+                == _exact_profile_fact_identity(text)
+            )
             fact_anchors = _fact_anchor_terms(fact.text)
             if output_locale == "zh-CN":
                 fact_anchors = {
@@ -1251,13 +1577,21 @@ def _validate_role_strategy(
             if (
                 not (fact_anchors & output_terms)
                 and not cross_locale_anchor_present
+                and not exact_profile_fact_identity_match
             ):
-                reject(
-                    ResumeValidationRuleCode.CLAIM_NO_EVIDENCE,
-                    f"{json_path}.text",
-                    claim_id=claim_id,
-                )
-                break
+                if output_locale == "zh-CN":
+                    warn_lexical_anchor(
+                        json_path=f"{json_path}.text",
+                        claim_id=claim_id,
+                        fact_id=fact.fact_id,
+                    )
+                else:
+                    reject(
+                        ResumeValidationRuleCode.CLAIM_NO_EVIDENCE,
+                        f"{json_path}.text",
+                        claim_id=claim_id,
+                    )
+                    break
 
         source_union = " ".join(fact.text for fact in resolved_facts)
         allowed_numbers = {
@@ -1316,7 +1650,15 @@ def _validate_role_strategy(
                 reject(rule_code, f"{json_path}.text", claim_id=claim_id)
         if output_locale == "zh-CN":
             for phrases, rule_code in _ZH_INFLATION_TERMS:
-                if any(phrase in text and phrase not in source_union for phrase in phrases):
+                if any(
+                    phrase in text
+                    and phrase not in source_union
+                    and not (
+                        phrase in {"提升", "提高"}
+                        and "improved" in source_words
+                    )
+                    for phrase in phrases
+                ):
                     reject(rule_code, f"{json_path}.text", claim_id=claim_id)
 
     for index, rewrite in enumerate(strategy.bullet_rewrites):
@@ -1398,8 +1740,11 @@ def _validate_role_strategy(
                 rejected_count=len(claim_failure_ids),
                 duplicate_count=duplicate_count,
                 source_span_failure_count=source_span_failure_count,
+                editorial_warnings=tuple(editorial_warnings),
             ),
         )
+    if return_editorial_warnings:
+        return entries, tuple(editorial_warnings)
     return entries
 
 
@@ -1430,12 +1775,13 @@ def _select_safe_rewrites(
 
     entries = _profile_entries(profile)
     try:
-        _validate_role_strategy(
+        _entries, editorial_warnings = _validate_role_strategy(
             strategy,
             profile=profile,
             job_description=job_description,
             atomic_facts=atomic_facts,
             output_locale=output_locale,
+            return_editorial_warnings=True,
         )
     except ResumeTemplateError as error:
         diagnostics = error.validation_diagnostics
@@ -1475,17 +1821,22 @@ def _select_safe_rewrites(
                 ),
             }
         )
-        _validate_role_strategy(
+        _entries, remaining_warnings = _validate_role_strategy(
             selected,
             profile=profile,
             job_description=job_description,
             atomic_facts=atomic_facts,
             output_locale=output_locale,
+            return_editorial_warnings=True,
         )
         return (
             selected,
             entries,
-            replace(diagnostics, validator_status="selective_pass"),
+            replace(
+                diagnostics,
+                validator_status="selective_pass",
+                editorial_warnings=remaining_warnings,
+            ),
         )
     verified_count = sum(
         rewrite.text == entries[rewrite.profile_entry_id]
@@ -1507,6 +1858,7 @@ def _select_safe_rewrites(
             duplicate_count=0,
             source_span_failure_count=0,
             validator_status="accepted",
+            editorial_warnings=editorial_warnings,
         ),
     )
 
@@ -1608,38 +1960,24 @@ def _build_evidence_adoption_trace(
 def _reorder_project_blocks_by_priority(
     body: ElementTree.Element,
     children: list[ElementTree.Element],
-    priority_by_text: dict[str, int],
+    priority_by_element: dict[ElementTree.Element, int],
 ) -> int:
     bounds = _section_bounds(children, "PROJECT HIGHLIGHTS")
     if bounds is None:
         return 0
     start, end = bounds
     section = children[start:end]
-    prefix: list[ElementTree.Element] = []
-    blocks: list[list[ElementTree.Element]] = []
-    current: list[ElementTree.Element] = []
-    for child in section:
-        text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
-        if text and not _is_bullet(child):
-            if current:
-                blocks.append(current)
-            current = [child]
-        elif current:
-            current.append(child)
-        else:
-            prefix.append(child)
-    if current:
-        blocks.append(current)
+    prefix, blocks = _project_blocks(section)
     ranked = sorted(
         enumerate(blocks),
         key=lambda item: (
             min(
                 (
-                    priority_by_text.get(_paragraph_text(child), len(priority_by_text))
+                    priority_by_element.get(child, len(priority_by_element))
                     for child in item[1]
                     if child.tag == f"{_W}p" and _is_bullet(child)
                 ),
-                default=len(priority_by_text),
+                default=len(priority_by_element),
             ),
             item[0],
         ),
@@ -1660,31 +1998,48 @@ def _reorder_skill_bullets_by_priority(
         return 0
     start, end = bounds
     section = children[start:end]
-    bullet_positions = [index for index, child in enumerate(section) if _is_bullet(child)]
-    bullets_by_text = {
-        _paragraph_text(section[index]): section[index] for index in bullet_positions
-    }
-    if set(bullets_by_text) != set(skill_priority):
+    skill_positions = _skill_line_positions(section)
+    bullets = [section[index] for index in skill_positions]
+    if Counter(_paragraph_text(bullet) for bullet in bullets) != Counter(skill_priority):
         raise ResumeTemplateError("Approved skill lines do not map cleanly to the DOCX")
-    reordered = [bullets_by_text[text] for text in skill_priority]
+    bullets_by_text: dict[str, list[ElementTree.Element]] = {}
+    for bullet in bullets:
+        bullets_by_text.setdefault(_paragraph_text(bullet), []).append(bullet)
+    reordered = [bullets_by_text[text].pop(0) for text in skill_priority]
     reordered_count = sum(
         section[position] is not bullet
-        for position, bullet in zip(bullet_positions, reordered, strict=True)
+        for position, bullet in zip(skill_positions, reordered, strict=True)
     )
     if reordered_count:
         replacement = list(section)
-        for position, bullet in zip(bullet_positions, reordered, strict=True):
+        for position, bullet in zip(skill_positions, reordered, strict=True):
             replacement[position] = bullet
         _replace_range(body, start, end, replacement)
     return reordered_count
 
 
-def _replace_bullet_text(
-    body: ElementTree.Element,
-    *,
-    source_text: str,
-    replacement_text: str,
+def _replace_bullet_element_text(
+    paragraph: ElementTree.Element, *, replacement_text: str
 ) -> None:
+    if paragraph.tag != f"{_W}p" or not _is_bullet(paragraph):
+        raise ResumeTemplateError("Approved profile entry is not a DOCX bullet")
+    text_nodes = list(paragraph.iter(f"{_W}t"))
+    if not text_nodes:
+        raise ResumeTemplateError("Approved DOCX bullet has no writable text")
+    original_text = "".join(node.text or "" for node in text_nodes)
+    literal_prefix = re.match(r"^\s*•\s*", original_text)
+    if literal_prefix is not None and not replacement_text.lstrip().startswith("•"):
+        replacement_text = f"{literal_prefix.group()}{replacement_text}"
+    text_nodes[0].text = replacement_text
+    for node in text_nodes[1:]:
+        node.text = ""
+
+
+def _replace_bullet_text(
+    body: ElementTree.Element, *, source_text: str, replacement_text: str
+) -> None:
+    """Compatibility fallback for TailoredDocx values without positional identities."""
+
     matches = [
         child
         for child in body
@@ -1692,12 +2047,7 @@ def _replace_bullet_text(
     ]
     if len(matches) != 1:
         raise ResumeTemplateError("Approved profile entry does not map uniquely to the DOCX")
-    text_nodes = list(matches[0].iter(f"{_W}t"))
-    if not text_nodes:
-        raise ResumeTemplateError("Approved DOCX bullet has no writable text")
-    text_nodes[0].text = replacement_text
-    for node in text_nodes[1:]:
-        node.text = ""
+    _replace_bullet_element_text(matches[0], replacement_text=replacement_text)
 
 
 def _replace_summary_text(
@@ -1782,6 +2132,7 @@ def tailor_resume_docx_with_gateway(
     candidate_recorder: Callable[[dict[str, object]], None] | None = None,
     candidate_evidence_pack: CandidateEvidencePack | None = None,
     output_locale: Literal["en-US", "zh-CN"] = "en-US",
+    reasoning_effort: Literal["none", "low"] = "none",
 ) -> TailoredDocx:
     """Use one explicit provider to rank and ground rewrites against approved bullets."""
     if not job_description.strip():
@@ -1796,6 +2147,18 @@ def tailor_resume_docx_with_gateway(
     )
     atomic_facts = candidate_evidence_pack.atomic_facts
     fact_ids = [item.fact_id for item in atomic_facts]
+    fact_source_by_id = {
+        item.fact_id: item.profile_entry_id for item in atomic_facts
+    }
+    requested_edit_ids = _focused_project_edit_ids(
+        profile,
+        entry_ids=entry_ids,
+        fact_source_by_id=fact_source_by_id,
+        prioritized_fact_ids=build_composition_evidence_plan(
+            job_description, atomic_facts
+        ).prioritized_fact_ids,
+        output_locale=output_locale,
+    )
     summary_paragraphs = [
         paragraph.text
         for paragraph in _section_slice(read_template_paragraphs(template), "SUMMARY")
@@ -1806,7 +2169,8 @@ def tailor_resume_docx_with_gateway(
         entry_ids,
         skill_ids=skill_ids,
         fact_ids=fact_ids,
-        include_summary=include_summary,
+        include_summary=include_summary and not requested_edit_ids,
+        requested_edit_ids=requested_edit_ids or None,
     )
     prepared = prepare_resume_gateway_payload(
         profile=profile,
@@ -1835,70 +2199,90 @@ def tailor_resume_docx_with_gateway(
     wire_positioning_brief = prepared.payload.positioning_brief
     positioning_brief = build_jd_positioning_brief(job_description, atomic_facts)
     deterministic_signals = wire_positioning_brief.top_hiring_signals
-    model_user = prepared.payload.model_dump_json()
-    model_system = (
-        "Construct the strongest truthful one-page Application Resume for this JD "
-        "using only approved Candidate Profile facts and the verified Candidate "
-        "Evidence Pack in candidate_profile. "
-        "The current Resume is a layout and work-history input, not the ceiling of "
-        "what may be expressed. Return the required JSON. Rank every profile entry "
-        "and every exact skill line once. "
-        "skill_priority must contain every request-specific SKILL key exactly once; "
-        "SKILL-01 maps to the first candidate_profile.skills item, and so on. "
-        "bullet_rewrites is an object whose required PROFILE keys are fixed by the "
-        "schema; provide one body for every key. Cite immutable atomic facts only through "
-        "their source_fact_ids from candidate_profile.atomic_facts. Wording may change; "
-        "do not repeat source sentences merely to pass validation. A REWRITE may cite "
-        "facts only from its target PROFILE entry. A SYNTHESIS must cite at least two "
-        "atomic facts, may combine verified Candidate Evidence assigned to its target, "
-        "and must express a real component from every cited fact. Preserve the meaning "
-        "of every cited fact while professionally paraphrasing it. Use SYNTHESIS to "
-        "surface high-value verified engineering work, compress redundancy, and create "
-        "a higher-information-density bullet. When summary_rewrite is available, "
-        "synthesize it from at least two atomic facts; otherwise return null. Never add "
-        "a technology, company/client, metric, ownership, scale, or outcome absent from "
-        "the cited sources. Do not omit template paragraphs. Use the deterministic hiring "
-        "signals below as read-only targeting "
-        "context; do not return or restate them. Unsupported requirements must be exact "
-        "quotes from the JD. Preserve every __SS_PRIVATE_*__ placeholder exactly. "
-        "The positioning_brief in the user payload is deterministic, read-only targeting "
-        "context. Follow composition_evidence_plan: use primary facts first, then "
-        "secondary facts only when they add a distinct supported component. Do not "
-        "force facts into a requirement with no allocation. Every factual number must "
-        "appear in a cited fact's text, metric, or allowed_numbers. "
-        "Write all editable narrative fields in "
-        + (
-            "natural professional Chinese"
-            if output_locale == "zh-CN"
-            else "natural professional US English"
+    model_user_payload = prepared.payload.model_dump(mode="json")
+    if requested_edit_ids:
+        model_user_payload["requested_edit_profile_entry_ids"] = list(requested_edit_ids)
+        model_user_payload["edit_goal"] = (
+            "只对列出的两个项目经历作实质编辑；其余 PROFILE 条目将由系统保留原文。"
         )
-        + ". Keep proper nouns and technical names when translation would reduce precision. "
-        "This is editorial composition from the same immutable FACT identities, not a "
-        "translation of another locale variant. Deterministic hiring signals: "
-        + json.dumps(deterministic_signals, ensure_ascii=False)
-    )
+    model_user = json.dumps(model_user_payload, ensure_ascii=False, separators=(",", ":"))
+    if output_locale == "zh-CN":
+        focused_instruction = (
+            "本次只编辑以下两个项目 PROFILE："
+            + ", ".join(requested_edit_ids)
+            + "。bullet_rewrites 只能包含这两个 key；每条都须作实质改写，"
+            "其余条目由系统按原文保留。summary_rewrite 必须为 null。\n"
+            if requested_edit_ids
+            else ""
+        )
+        model_system = (
+            _ZH_RESUME_EDITOR_SYSTEM_PROMPT
+            + focused_instruction
+            + json.dumps(deterministic_signals, ensure_ascii=False)
+        )
+    else:
+        model_system = (
+            "Construct the strongest truthful one-page Application Resume for this JD "
+            "using only approved Candidate Profile facts and the verified Candidate "
+            "Evidence Pack in candidate_profile. "
+            "The current Resume is a layout and work-history input, not the ceiling of "
+            "what may be expressed. Return the required JSON. Rank every profile entry "
+            "and every exact skill line once. "
+            "skill_priority must contain every request-specific SKILL key exactly once; "
+            "SKILL-01 maps to the first candidate_profile.skills item, and so on. "
+            "bullet_rewrites is an object whose required PROFILE keys are fixed by the "
+            "schema; provide one body for every key. Cite immutable atomic facts through "
+            "the target_fact_id for that fixed PROFILE key and optional supporting_fact_ids "
+            "from candidate_profile.atomic_facts. Wording may change; "
+            "do not repeat source sentences merely to pass validation. A REWRITE may cite "
+            "facts only from its target PROFILE entry. A SYNTHESIS must cite at least two "
+            "atomic facts, may combine verified Candidate Evidence assigned to its target, "
+            "and must express a real component from every cited fact. Preserve the meaning "
+            "of every cited fact while professionally paraphrasing it. Use SYNTHESIS to "
+            "surface high-value verified engineering work, compress redundancy, and create "
+            "a higher-information-density bullet. When summary_rewrite is available, "
+            "synthesize it from at least two atomic facts; otherwise return null. Never add "
+            "a technology, company/client, metric, ownership, scale, or outcome absent from "
+            "the cited sources. Do not omit template paragraphs. Use the deterministic hiring "
+            "signals below as read-only targeting "
+            "context; do not return or restate them. Unsupported requirements must be exact "
+            "quotes from the JD. Preserve every __SS_PRIVATE_*__ placeholder exactly. "
+            "The positioning_brief in the user payload is deterministic, read-only targeting "
+            "context. Follow composition_evidence_plan: use primary facts first, then "
+            "secondary facts only when they add a distinct supported component. Do not "
+            "force facts into a requirement with no allocation. Every factual number must "
+            "appear in a cited fact's text, metric, or allowed_numbers. "
+            "Write all editable narrative fields in "
+            "natural professional US English"
+            ". Keep proper nouns and technical names when translation would reduce precision. "
+            "This is editorial composition from the same immutable FACT identities, not a "
+            "translation of another locale variant. Deterministic hiring signals: "
+            + json.dumps(deterministic_signals, ensure_ascii=False)
+        )
     model_started = time.perf_counter()
     exact_strategy = gateway.complete(
         response_schema,
         system=model_system,
         user=model_user,
-        reasoning_effort="none",
+        reasoning_effort=reasoning_effort,
     )
     strategy = _role_strategy_from_exact(
         exact_strategy,
         entry_ids=entry_ids,
         sanitized_skill_by_id=sanitized_skill_by_id,
-        fact_source_by_id={
-            item.fact_id: item.profile_entry_id
-            for item in prepared.payload.candidate_profile.atomic_facts
-        },
+        fact_source_by_id=fact_source_by_id,
         top_hiring_signals=deterministic_signals,
+        source_entries=entries,
+        requested_edit_ids=requested_edit_ids or None,
     )
     model_call_profile: dict[str, object] = {
         "schema_version": "1.0",
         "model_call_count": 1,
         "output_contract": "evidence_backed_resume_composition_v0.1",
-        "reasoning_effort": "none",
+        "provider": gateway.descriptor.provider.value,
+        "model": gateway.descriptor.model,
+        "reasoning_effort": reasoning_effort,
+        "real_call": True,
         "gateway_wall_ms": int((time.perf_counter() - model_started) * 1000),
         "system_chars": len(model_system),
         "user_chars": len(model_user),
@@ -1913,8 +2297,34 @@ def tailor_resume_docx_with_gateway(
     }
     provider_profile = getattr(gateway, "last_call_profile", None)
     if isinstance(provider_profile, ModelCallProfile):
+        token_usage = {
+            key: value
+            for key, value in {
+                "input_tokens": provider_profile.prompt_eval_tokens,
+                "output_tokens": provider_profile.output_tokens,
+            }.items()
+            if value is not None
+        }
+        model_call_profile.update(
+            {
+                "provider": provider_profile.provider.value,
+                "model": provider_profile.model,
+                "reasoning_effort": provider_profile.reasoning_effort,
+                "thinking_enabled": provider_profile.thinking_enabled,
+                "latency_ms": provider_profile.wall_ms,
+                "token_usage": token_usage or None,
+            }
+        )
         model_call_profile["provider_metrics"] = provider_profile.model_dump(
             mode="json"
+        )
+    else:
+        model_call_profile.update(
+            {
+                "thinking_enabled": reasoning_effort != "none",
+                "latency_ms": model_call_profile["gateway_wall_ms"],
+                "token_usage": None,
+            }
         )
     validate_role_strategy_placeholders(strategy, prepared)
     strategy = restore_role_strategy(strategy, prepared.private_replacements)
@@ -1956,6 +2366,7 @@ def tailor_resume_docx_with_gateway(
         validation_diagnostics = replace(
             error.validation_diagnostics,
             validator_status="fallback_pass",
+            editorial_warnings=(),
         )
         role_strategy_fallback_applied = True
         role_strategy_fallback_code = "ROLE_STRATEGY_TRUTH_REJECTED"
@@ -1974,17 +2385,23 @@ def tailor_resume_docx_with_gateway(
         )
     members, document = _read_package(template)
     root, body = _parse_document(document)
+    entry_elements = _profile_entry_elements(body, profile)
+    if set(entry_elements) != set(validated_entries):
+        raise ResumeTemplateError("Approved profile identities do not match the DOCX")
     source_paragraphs = [
         _paragraph_text(child) for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ]
     rank_by_id = {entry_id: index for index, entry_id in enumerate(strategy.evidence_priority)}
-    priority_by_text = {
-        validated_entries[entry_id]: rank for entry_id, rank in rank_by_id.items()
+    priority_by_element = {
+        entry_elements[entry_id]: rank for entry_id, rank in rank_by_id.items()
     }
-    project_count = _reorder_project_blocks_by_priority(body, list(body), priority_by_text)
+    project_count = _reorder_project_blocks_by_priority(
+        body, list(body), priority_by_element
+    )
     skill_count = _reorder_skill_bullets_by_priority(
         body, list(body), strategy.skill_priority
     )
+    rendered_profile_entry_ids = _rendered_profile_entry_ids(body, entry_elements)
     summary_rewritten = False
     if strategy.summary_rewrite is not None and profile.summary is not None:
         summary_rewritten = _replace_summary_text(
@@ -2000,14 +2417,75 @@ def tailor_resume_docx_with_gateway(
                 supported_count=max(0, validation_diagnostics.supported_count - 1),
                 rejected_count=validation_diagnostics.rejected_count + 1,
                 validator_status="selective_pass",
+                editorial_warnings=tuple(
+                    warning
+                    for warning in validation_diagnostics.editorial_warnings
+                    if warning.claim_id != "SUMMARY"
+                ),
             )
     rewrite_by_id = {item.profile_entry_id: item.text for item in strategy.bullet_rewrites}
-    for entry_id, source_text in validated_entries.items():
-        _replace_bullet_text(
-            body,
-            source_text=source_text,
-            replacement_text=rewrite_by_id[entry_id],
+    for entry_id in validated_entries:
+        _replace_bullet_element_text(
+            entry_elements[entry_id], replacement_text=rewrite_by_id[entry_id]
         )
+    strategy = strategy.model_copy(
+        update={
+            "bullet_rewrites": [
+                rewrite.model_copy(
+                    update={"text": _paragraph_text(entry_elements[rewrite.profile_entry_id])}
+                )
+                for rewrite in strategy.bullet_rewrites
+            ]
+        }
+    )
+    final_rewrite_by_id = {
+        rewrite.profile_entry_id: rewrite.text for rewrite in strategy.bullet_rewrites
+    }
+    rendered_changed_claim_ids = {
+        rewrite.profile_entry_id
+        for rewrite in strategy.bullet_rewrites
+        if rewrite.text != entries[rewrite.profile_entry_id]
+    }
+    if summary_rewritten:
+        rendered_changed_claim_ids.add("SUMMARY")
+    rendered_warning_claim_ids = {
+        warning.claim_id
+        for warning in validation_diagnostics.editorial_warnings
+        if warning.claim_id in rendered_changed_claim_ids
+    }
+    validation_diagnostics = replace(
+        validation_diagnostics,
+        editorial_warnings=tuple(
+            warning
+            for warning in validation_diagnostics.editorial_warnings
+            if warning.claim_id in rendered_warning_claim_ids
+        ),
+    )
+    rendered_rewrite_count = len(rendered_changed_claim_ids)
+    rendered_unverified_count = len(rendered_warning_claim_ids)
+    requested_project_material_rewrites = sum(
+        _is_material_requested_project_rewrite(
+            entries[entry_id], final_rewrite_by_id[entry_id]
+        )
+        for entry_id in requested_edit_ids
+    )
+    requested_project_rewrite_quality_status = (
+        "QUALITY_MET"
+        if requested_edit_ids and requested_project_material_rewrites == len(requested_edit_ids)
+        else "QUALITY_NOT_MET"
+        if requested_edit_ids
+        else "NOT_APPLICABLE"
+    )
+    validation_diagnostics = replace(
+        validation_diagnostics,
+        verified_count=(
+            validation_diagnostics.candidate_count
+            - validation_diagnostics.rejected_count
+            - rendered_rewrite_count
+        ),
+        supported_count=rendered_rewrite_count - rendered_unverified_count,
+        unverified_count=rendered_unverified_count,
+    )
     _localize_resume_headings(body, output_locale)
     _remove_trailing_empty_paragraphs(body)
     if len(source_paragraphs) != sum(
@@ -2039,6 +2517,7 @@ def tailor_resume_docx_with_gateway(
         source_paragraph_count=len(source_paragraphs),
         claims_preserved=True,
         grounded_rewrites=validation_diagnostics.supported_count,
+        unverified_rewrites=validation_diagnostics.unverified_count,
         synthesized_rewrites=sum(
             rewrite.kind == "SYNTHESIS"
             and rewrite.text != validated_entries[rewrite.profile_entry_id]
@@ -2053,11 +2532,17 @@ def tailor_resume_docx_with_gateway(
         model_call_profile=model_call_profile,
         validation_diagnostics=validation_diagnostics,
         role_strategy=strategy,
+        rendered_profile_entry_ids=rendered_profile_entry_ids,
         candidate_evidence_pack=candidate_evidence_pack,
         positioning_brief=positioning_brief,
         evidence_adoption=evidence_adoption,
         role_strategy_fallback_applied=role_strategy_fallback_applied,
         role_strategy_fallback_code=role_strategy_fallback_code,
+        requested_edit_profile_entry_ids=requested_edit_ids,
+        requested_project_material_rewrites=requested_project_material_rewrites,
+        requested_project_rewrite_quality_status=(
+            requested_project_rewrite_quality_status
+        ),
     )
 
 
@@ -2066,6 +2551,7 @@ def request_resume_expert_review(
     *,
     profile: CandidateProfile,
     gateway: ModelGateway,
+    reasoning_effort: Literal["none", "low"] = "low",
 ) -> ResumeExpertReviewResult:
     """Send only hiring signals, source fragments, and the current draft."""
 
@@ -2125,7 +2611,7 @@ def request_resume_expert_review(
             ensure_ascii=False,
             sort_keys=True,
         ),
-        reasoning_effort="low",
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -2179,7 +2665,7 @@ def apply_resume_expert_review(
         for rewrite in strategy.bullet_rewrites
     ]
     reviewed_strategy = strategy.model_copy(update={"bullet_rewrites": updated_rewrites})
-    _validate_role_strategy(
+    _entries, expert_warnings = _validate_role_strategy(
         reviewed_strategy,
         profile=profile,
         job_description=job_description,
@@ -2188,6 +2674,8 @@ def apply_resume_expert_review(
             if tailored.candidate_evidence_pack is not None
             else None
         ),
+        output_locale=tailored.output_locale,
+        return_editorial_warnings=True,
     )
 
     members, document = _read_package(tailored.content)
@@ -2195,12 +2683,41 @@ def apply_resume_expert_review(
     source_paragraph_count = sum(
         1 for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     )
-    for entry_id, patch in patch_by_id.items():
-        _replace_bullet_text(
-            body,
-            source_text=rewrite_by_id[entry_id].text,
-            replacement_text=patch.after,
+    if tailored.rendered_profile_entry_ids:
+        rendered_elements = [
+            element
+            for heading in ("WORK EXPERIENCE", "PROJECT HIGHLIGHTS")
+            for element in _section_bullet_elements(body, heading)
+        ]
+        if len(rendered_elements) != len(tailored.rendered_profile_entry_ids):
+            raise ResumeTemplateError("Expert review cannot map the rendered draft")
+        element_by_entry_id = dict(
+            zip(tailored.rendered_profile_entry_ids, rendered_elements, strict=True)
         )
+        if set(element_by_entry_id) != allowed_ids or any(
+            _paragraph_text(element_by_entry_id[entry_id]) != rewrite.text
+            for entry_id, rewrite in rewrite_by_id.items()
+        ):
+            raise ResumeTemplateError("Expert review cannot map the rendered draft")
+        for entry_id, patch in patch_by_id.items():
+            _replace_bullet_element_text(
+                element_by_entry_id[entry_id], replacement_text=patch.after
+            )
+        final_text_by_id = {
+            entry_id: _paragraph_text(element)
+            for entry_id, element in element_by_entry_id.items()
+        }
+    else:
+        for entry_id, patch in patch_by_id.items():
+            _replace_bullet_text(
+                body,
+                source_text=rewrite_by_id[entry_id].text,
+                replacement_text=patch.after,
+            )
+        final_text_by_id = {
+            rewrite.profile_entry_id: rewrite.text
+            for rewrite in reviewed_strategy.bullet_rewrites
+        }
     if source_paragraph_count != sum(
         1 for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ):
@@ -2216,18 +2733,88 @@ def apply_resume_expert_review(
                 reviewed_document if info.filename == _DOCUMENT_PART else content,
             )
     output = target.getvalue()
+    finalized_strategy = reviewed_strategy.model_copy(
+        update={
+            "bullet_rewrites": [
+                rewrite.model_copy(
+                    update={"text": final_text_by_id[rewrite.profile_entry_id]}
+                )
+                for rewrite in reviewed_strategy.bullet_rewrites
+            ]
+        }
+    )
+    rendered_changed_claim_ids = {
+        rewrite.profile_entry_id
+        for rewrite in finalized_strategy.bullet_rewrites
+        if rewrite.text != approved_entries[rewrite.profile_entry_id]
+    }
+    if tailored.summary_rewritten and finalized_strategy.summary_rewrite is not None:
+        rendered_changed_claim_ids.add("SUMMARY")
+    rendered_warning_claim_ids = {
+        warning.claim_id
+        for warning in expert_warnings
+        if warning.claim_id in rendered_changed_claim_ids
+    }
+    final_diagnostics = ResumeValidationDiagnostics(
+        failures=(),
+        candidate_count=len(approved_entries) + int(profile.summary is not None),
+        verified_count=(
+            len(approved_entries)
+            + int(profile.summary is not None)
+            - len(rendered_changed_claim_ids)
+        ),
+        supported_count=(
+            len(rendered_changed_claim_ids) - len(rendered_warning_claim_ids)
+        ),
+        rejected_count=0,
+        duplicate_count=0,
+        source_span_failure_count=0,
+        validator_status="accepted",
+        editorial_warnings=tuple(
+            warning
+            for warning in expert_warnings
+            if warning.claim_id in rendered_warning_claim_ids
+        ),
+        unverified_count=len(rendered_warning_claim_ids),
+    )
+    requested_project_material_rewrites = sum(
+        _is_material_requested_project_rewrite(
+            approved_entries[entry_id], final_text_by_id[entry_id]
+        )
+        for entry_id in tailored.requested_edit_profile_entry_ids
+    )
+    requested_project_rewrite_quality_status = (
+        "QUALITY_MET"
+        if tailored.requested_edit_profile_entry_ids
+        and requested_project_material_rewrites
+        == len(tailored.requested_edit_profile_entry_ids)
+        else "QUALITY_NOT_MET"
+        if tailored.requested_edit_profile_entry_ids
+        else "NOT_APPLICABLE"
+    )
     return replace(
         tailored,
         content=output,
         output_sha256=hashlib.sha256(output).hexdigest(),
-        grounded_rewrites=len(reviewed_strategy.bullet_rewrites),
-        role_strategy=reviewed_strategy,
+        grounded_rewrites=final_diagnostics.supported_count,
+        unverified_rewrites=final_diagnostics.unverified_count,
+        synthesized_rewrites=sum(
+            rewrite.kind == "SYNTHESIS"
+            and rewrite.profile_entry_id in rendered_changed_claim_ids
+            for rewrite in finalized_strategy.bullet_rewrites
+        ),
+        validation_diagnostics=final_diagnostics,
+        role_strategy=finalized_strategy,
         expert_review=review,
         expert_review_attempted=True,
         expert_review_skipped_code=None,
         expert_rewrites=len(review.patches),
         expert_provider=expert_provider,
         expert_model=expert_model,
+        requested_project_material_rewrites=requested_project_material_rewrites,
+        requested_project_rewrite_quality_status=(
+            requested_project_rewrite_quality_status
+        ),
     )
 
 

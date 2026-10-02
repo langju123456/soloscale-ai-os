@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.parse
 import zipfile
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Literal, TypeVar, cast
@@ -34,6 +35,8 @@ from soloscale.local_ui import (
     _apply_ai_provider_preference,
     _create_learning_case_ui,
     _create_resume_pdf_preview,
+    _credential_provider_state,
+    _deepseek_connection_status,
     _finalize_resume_preview,
     _heygen_settings_page,
     _home_page,
@@ -42,6 +45,7 @@ from soloscale.local_ui import (
     _load_ai_provider_preference,
     _page,
     _parse_submission,
+    _record_ai_provider_validation,
     _result_card,
     _resume_graph,
     _run_action,
@@ -61,6 +65,8 @@ from soloscale.model_gateway import (
     GatewayConfigurationState,
     GatewayDescriptor,
     GatewayTransportScope,
+    ModelGatewayTimeoutError,
+    ModelGatewayTransportError,
     ModelProviderId,
 )
 from soloscale.resume_docx import read_template_paragraphs
@@ -202,12 +208,16 @@ class RecordingResumeGateway:
         user: str,
         reasoning_effort: Literal["none", "low"] = "low",
     ) -> ResponseModelT:
-        assert "approved Candidate Profile facts" in system
-        assert "Deterministic hiring signals:" in system
+        request_payload = json.loads(user)
+        if request_payload["output_locale"] == "zh-CN":
+            assert "candidate_profile 中已获批的不可变事实" in system
+            assert "招聘信号：" in system
+        else:
+            assert "approved Candidate Profile facts" in system
+            assert "Deterministic hiring signals:" in system
         assert "top_hiring_signals" not in schema.model_json_schema()["properties"]
         assert reasoning_effort == "none"
         self.requests.append(user)
-        request_payload = json.loads(user)
         fact_ids_by_source: dict[str, list[str]] = {}
         for fact in request_payload["candidate_profile"]["atomic_facts"]:
             if fact["source_kind"] != "PROFILE_ENTRY":
@@ -327,6 +337,18 @@ class RecordingResumeGateway:
                 }
             role_summary = "面向目标岗位、受事实约束的简历策略。"
             guidance = "使用自然中文重组已批准事实，不增加经历。"
+            requested_edit_ids = request_payload.get(
+                "requested_edit_profile_entry_ids"
+            )
+            if isinstance(requested_edit_ids, list):
+                assert all(isinstance(entry_id, str) for entry_id in requested_edit_ids)
+                if synthesis_target not in requested_edit_ids:
+                    synthesis_target = None
+                    synthesis_sources = []
+                summary_rewrite = None
+                rewrites = {
+                    entry_id: rewrites[entry_id] for entry_id in requested_edit_ids
+                }
         skill_ids = {
             "Customer delivery, requirements, stakeholders": "SKILL-01",
             "Python, RAG, agents, evals": "SKILL-02",
@@ -529,7 +551,8 @@ def test_home_keeps_three_outcomes_visible_and_resume_flow_intact(
     assert 'name="approve_candidate_claims"' not in page
     assert 'name="approve_model_context"' not in page
     assert "不会静默改用其他服务" in page
-    assert "使用当前 AI 服务生成" in page
+    assert "使用本次选择生成" in page
+    assert 'name="resume_ai_selection"' in page
     assert 'href="/?lang=zh-CN"' in page
     assert 'href="/resume?lang=zh-CN"' in page
     assert 'href="/advanced?lang=zh-CN"' in page
@@ -625,6 +648,7 @@ def test_ai_provider_preference_is_shared_and_persists_privately(tmp_path: Path)
     assert resume_form == content_form == {
         "generation_mode": ModelProviderId.OLLAMA.value,
         "provider_model": "qwen3:8b",
+        "provider_reasoning_effort": "none",
     }
     rendered = _page(None, data_root, {})
     assert "本地 AI" in rendered
@@ -635,6 +659,8 @@ def test_ai_provider_preference_is_shared_and_persists_privately(tmp_path: Path)
     assert settings_path.parent.stat().st_mode & 0o777 == 0o700
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     assert payload["default_ai_provider"] == ModelProviderId.OLLAMA.value
+    assert payload["deepseek_model"] == "deepseek-v4-flash"
+    assert payload["deepseek_reasoning_effort"] == "low"
     assert "api_key" not in payload
 
 
@@ -650,7 +676,8 @@ def test_ai_service_pages_show_one_default_and_keep_openai_secret_out_of_html(
     assert "当前 AI 服务" in overview
     assert 'href="/settings/ai/local?lang=zh-CN"' in overview
     assert 'href="/settings/ai/openai?lang=zh-CN"' in overview
-    assert "选择一次，所有工作流自动使用" in overview
+    assert 'href="/settings/ai/deepseek?lang=zh-CN"' in overview
+    assert "选择一次，三个 AI 工作流自动使用" in overview
     assert "创作与发布服务" in overview
     assert "HeyGen" in overview
     assert 'href="/settings/media/heygen?lang=zh-CN"' in overview
@@ -691,6 +718,14 @@ def test_ai_service_pages_show_one_default_and_keep_openai_secret_out_of_html(
         assert sentinel not in desktop_openai
     finally:
         _clear_for_tests()
+
+    deepseek_page = _ai_settings_page(
+        data_root, detail="deepseek", desktop_mode=True
+    )
+    assert "DeepSeek V4 Flash" in deepseek_page
+    assert 'name="deepseek_reasoning_effort"' in deepseek_page
+    assert "Thinking" not in deepseek_page
+    assert 'value="use_default" type="submit" disabled' in deepseek_page
 
     browser_heygen = _heygen_settings_page(data_root)
     assert "普通浏览器不会接收它" in browser_heygen
@@ -1547,6 +1582,18 @@ def test_user_resume_flow_generates_matching_private_and_application_docx(
     assert "安全离线模式" in rendered
     assert "为什么这些内容会出现在我的简历里" in rendered
     assert "原文已核对" in rendered
+    metadata["truth_status"] = "REVIEW_REQUIRED"
+    metadata["requested_edit_profile_entry_ids"] = ["PROFILE-02", "PROFILE-03"]
+    metadata["requested_project_material_rewrites"] = 0
+    metadata["requested_project_rewrite_quality_status"] = "QUALITY_NOT_MET"
+    (run_dir / "09_user_ui.json").write_text(json.dumps(metadata), encoding="utf-8")
+    review_rendered = _user_page(result, tmp_path / ".soloscale", {})
+    assert "编辑草稿，需人工核对" in review_rendered
+    assert "项目改写未达到两条实质修改的检查要求" in review_rendered
+    assert "简历草稿待人工核对" in review_rendered
+    assert review_rendered.index("编辑草稿，需人工核对") < review_rendered.index(
+        "为什么这些内容会出现在我的简历里"
+    )
 
 
 def test_resume_ui_generation_is_jd_conditioned_and_keeps_unrelated_gaps_visible(
@@ -1653,6 +1700,14 @@ def test_resume_ui_generation_is_jd_conditioned_and_keeps_unrelated_gaps_visible
         assert metadata["generation_mode"] == "ai"
         assert metadata["provider"] == "ollama"
         assert metadata["model_call_profile"]["model_call_count"] == 1
+        assert metadata["model_call_profile"]["provider"] == "ollama"
+        assert metadata["model_call_profile"]["model"] == "test-model"
+        assert metadata["model_call_profile"]["reasoning_effort"] == "none"
+        assert metadata["model_call_profile"]["real_call"] is True
+        assert metadata["reasoning_effort"] == "none"
+        assert metadata["real_call"] is True
+        assert metadata["token_usage"] is None
+        assert isinstance(metadata["latency_ms"], int)
         assert (
             metadata["model_call_profile"]["output_contract"]
             == "evidence_backed_resume_composition_v0.1"
@@ -1899,7 +1954,10 @@ def test_resume_ui_rejects_only_unsafe_rewrite_and_keeps_original_bullet(
             unsafe["PROFILE-03"] = {
                 "kind": "REWRITE",
                 "text": "Led an unsupported FPGA compiler program by 40%.",
-                "source_fact_ids": rewrites["PROFILE-03"]["source_fact_ids"],
+                "target_fact_id": rewrites["PROFILE-03"]["target_fact_id"],
+                "supporting_fact_ids": rewrites["PROFILE-03"][
+                    "supporting_fact_ids"
+                ],
             }
             payload["bullet_rewrites"] = unsafe
             return schema.model_validate(payload)
@@ -1962,6 +2020,123 @@ def test_resume_ui_rejects_only_unsafe_rewrite_and_keeps_original_bullet(
     rendered = _user_page(result, tmp_path / "data", {})
     assert "1 项未通过事实校验，已逐项回退" in rendered
     assert "Summary已重写" in rendered
+
+
+def test_resume_ollama_factory_requests_the_resume_context_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class EmptyStore:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def search(self, query: str, limit: int) -> list[RetrievalHit]:
+            del query, limit
+            return []
+
+    captured: dict[str, object] = {}
+
+    def resume_gateway(provider: str, **kwargs: object) -> RecordingResumeGateway:
+        captured["provider"] = provider
+        captured["ollama_context_tokens"] = kwargs.get("ollama_context_tokens")
+        captured["ollama_timeout_seconds"] = kwargs.get("ollama_timeout_seconds")
+        return RecordingResumeGateway()
+
+    monkeypatch.setattr("soloscale.local_ui.KnowledgeStore", EmptyStore)
+    monkeypatch.setattr("soloscale.local_ui.model_gateway_for", resume_gateway)
+    monkeypatch.setattr(
+        "soloscale.local_ui._create_resume_pdf_preview", lambda source, target: False
+    )
+    result = _run_user_resume(
+        {
+            "job_description": "Required: Python and RAG.",
+            "generation_mode": "ollama",
+            "provider_model": "test-model",
+            "approve_resume_processing": "yes",
+        },
+        {
+            "resume_template": UploadedFile(
+                filename="Synthetic.docx",
+                content_type="application/octet-stream",
+                content=_role_resume_docx(),
+            )
+        },
+        tmp_path / "data",
+        tmp_path / "repo",
+    )
+
+    assert result.return_code == 0, result.stderr
+    assert captured == {
+        "provider": "ollama",
+        "ollama_context_tokens": 16_384,
+        "ollama_timeout_seconds": 600,
+    }
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        (
+            ModelGatewayTimeoutError("deadline"),
+            "所选 AI 服务处理超时；本次没有重试、回退或保存新的申请包。",
+        ),
+        (
+            ModelGatewayTransportError("connection"),
+            "所选 AI 服务当前无法连接；本次没有回退到通用简历，也没有保存新的申请包。",
+        ),
+    ],
+)
+def test_resume_ui_keeps_timeout_distinct_from_connection_failure(
+    tmp_path: Path,
+    failure: ModelGatewayTransportError,
+    expected_message: str,
+) -> None:
+    class FailingGateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Test gateway",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(
+            self,
+            schema: type[ResponseModelT],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: Literal["none", "low"] = "low",
+        ) -> ResponseModelT:
+            del schema, system, user, reasoning_effort
+            self.calls += 1
+            raise failure
+
+    gateway = FailingGateway()
+    result = _run_user_resume(
+        {
+            "job_description": "Forward Deployed Engineer\nreliable agents",
+            "generation_mode": "ollama",
+            "provider_model": "test-model",
+            "approve_resume_processing": "yes",
+        },
+        {
+            "resume_template": UploadedFile(
+                filename="Synthetic.docx",
+                content_type="application/octet-stream",
+                content=_role_resume_docx(),
+            )
+        },
+        tmp_path / "data",
+        tmp_path / "repo",
+        gateway=gateway,
+    )
+    assert result.return_code == 1
+    assert result.stderr == expected_message
+    assert gateway.calls == 1
 
 
 def test_resume_ui_uses_safe_strategy_after_global_truth_rejection(
@@ -2423,3 +2598,261 @@ def test_applications_section_truthfully_separates_drafts_and_applications(
     assert "更新状态" in html
     assert "打开简历" in html
     assert "准备面试 / 练习缺口" in html
+
+
+def test_ai_service_local_validate_set_default_updates_overview_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_data_root = SoloScaleLocalUIHandler.ui_data_root
+    previous_token = SoloScaleLocalUIHandler.desktop_session_token
+    previous_host = SoloScaleLocalUIHandler.desktop_expected_host
+    monkeypatch.setattr(
+        "soloscale.local_ui._ollama_readiness",
+        lambda preference: OllamaReadiness(True, True, True, ("qwen3:8b",)),
+    )
+    SoloScaleLocalUIHandler.ui_data_root = tmp_path / "data"
+    SoloScaleLocalUIHandler.desktop_session_token = None
+    SoloScaleLocalUIHandler.desktop_expected_host = None
+    server = HTTPServer(("127.0.0.1", 0), SoloScaleLocalUIHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+    try:
+        body = urllib.parse.urlencode(
+            {
+                "action": "use_default",
+                "model": "qwen3:8b",
+                "ollama_url": "http://127.0.0.1:11434",
+                "ui_locale": "en",
+            }
+        )
+        connection.request(
+            "POST",
+            "/settings/ai/local",
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        response = connection.getresponse()
+        response.read()
+        assert response.status == 303
+        location = response.getheader("Location") or ""
+        assert location.startswith("/settings/ai?")
+        assert "provider=saved" in location
+
+        connection.request("GET", location)
+        overview = connection.getresponse()
+        rendered = overview.read().decode("utf-8")
+        assert overview.status == 200
+        assert "Current AI service" in rendered
+        assert "Local AI" in rendered
+        assert "qwen3:8b" in rendered
+        assert "READY" in rendered
+        assert _load_ai_provider_preference(tmp_path / "data").provider is ModelProviderId.OLLAMA
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        SoloScaleLocalUIHandler.ui_data_root = previous_data_root
+        SoloScaleLocalUIHandler.desktop_session_token = previous_token
+        SoloScaleLocalUIHandler.desktop_expected_host = previous_host
+
+
+def test_deepseek_ready_is_configuration_bound_and_persists_without_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from soloscale.desktop_credentials import (
+        _clear_for_tests,
+        _frame_for_tests,
+        configure_desktop_credentials_from_stdin,
+    )
+
+    data_root = tmp_path / "data"
+    secret = "synthetic-deepseek-key-never-render"
+    envelope = json.dumps(
+        {"schema_version": "1.0", "deepseek_api_key": secret}
+    ).encode()
+    configure_desktop_credentials_from_stdin(_frame_for_tests(envelope))
+    monkeypatch.setattr(
+        "soloscale.local_ui._ollama_readiness",
+        lambda preference: OllamaReadiness(False, False, False),
+    )
+    try:
+        preference = _save_ai_provider_preference(
+            data_root,
+            provider=ModelProviderId.DEEPSEEK.value,
+            deepseek_model="deepseek-v4-pro",
+            deepseek_reasoning_effort="high",
+            set_default=False,
+        )
+        assert (
+            _credential_provider_state(
+                preference,
+                ModelProviderId.DEEPSEEK,
+                credential_configured=True,
+            )
+            == "configured_not_tested"
+        )
+        _record_ai_provider_validation(
+            data_root,
+            provider=ModelProviderId.DEEPSEEK,
+            status="ready",
+            detail="ready",
+        )
+        saved = _save_ai_provider_preference(
+            data_root,
+            provider=ModelProviderId.DEEPSEEK.value,
+            deepseek_model="deepseek-v4-pro",
+            deepseek_reasoning_effort="high",
+        )
+        assert saved.provider is ModelProviderId.DEEPSEEK
+        reloaded = _load_ai_provider_preference(data_root)
+        assert (
+            _credential_provider_state(
+                reloaded,
+                ModelProviderId.DEEPSEEK,
+                credential_configured=True,
+            )
+            == "ready"
+        )
+        page = _ai_settings_page(data_root, detail="deepseek", desktop_mode=True)
+        assert 'data-provider-status="ready"' in page
+        assert "READY" in page
+        assert secret not in page
+
+        changed = _save_ai_provider_preference(
+            data_root,
+            provider=ModelProviderId.DEEPSEEK.value,
+            deepseek_model="deepseek-v4-pro",
+            deepseek_reasoning_effort="max",
+            set_default=False,
+        )
+        assert (
+            _credential_provider_state(
+                changed,
+                ModelProviderId.DEEPSEEK,
+                credential_configured=True,
+            )
+            == "configured_not_tested"
+        )
+        raw = (data_root / "settings" / "ai-provider.json").read_text(
+            encoding="utf-8"
+        )
+        assert secret not in raw
+        assert not (data_root / "settings" / "deepseek-provider.json").exists()
+    finally:
+        _clear_for_tests()
+
+
+def test_deepseek_validation_confirms_the_selected_model(
+    tmp_path: Path,
+) -> None:
+    from soloscale.desktop_credentials import (
+        _clear_for_tests,
+        _frame_for_tests,
+        configure_desktop_credentials_from_stdin,
+    )
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self, maximum: int) -> bytes:
+            del maximum
+            return b'{"object":"list","data":[{"id":"deepseek-v4-pro"}]}'
+
+    captured: dict[str, object] = {}
+
+    def opener(request: object, timeout: int) -> Response:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    envelope = json.dumps(
+        {"schema_version": "1.0", "deepseek_api_key": "synthetic-key"}
+    ).encode()
+    configure_desktop_credentials_from_stdin(_frame_for_tests(envelope))
+    try:
+        preference = _save_ai_provider_preference(
+            tmp_path,
+            provider=ModelProviderId.DEEPSEEK.value,
+            deepseek_model="deepseek-v4-pro",
+            set_default=False,
+        )
+        assert _deepseek_connection_status(preference, opener=opener) == "ready"
+        request = captured["request"]
+        assert getattr(request, "full_url", "") == "https://api.deepseek.com/models"
+        missing = replace(preference, deepseek_model="deepseek-v4-flash")
+        assert _deepseek_connection_status(missing, opener=opener) == "model-unavailable"
+    finally:
+        _clear_for_tests()
+
+
+def test_learning_page_never_calls_the_global_model_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def forbidden_gateway(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise AssertionError("Learning must remain deterministic")
+
+    monkeypatch.setattr("soloscale.local_ui.model_gateway_for", forbidden_gateway)
+
+    page = _learning_page(tmp_path / "data", None, {}, locale="en")
+
+    assert "Learning" in page
+    assert calls == 0
+
+
+def test_legacy_deepseek_settings_migrate_once_into_canonical_authority(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    legacy = data_root / "settings" / "deepseek-provider.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "model_id": "deepseek-v4-pro",
+                "reasoning_effort": "max",
+                "thinking_enabled": False,
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = legacy.read_bytes()
+
+    migrated = _load_ai_provider_preference(data_root)
+
+    assert migrated.deepseek_model == "deepseek-v4-pro"
+    assert migrated.deepseek_reasoning_effort == "none"
+    assert migrated.legacy_deepseek_migrated is True
+    assert legacy.read_bytes() == original
+    canonical = json.loads(
+        (data_root / "settings" / "ai-provider.json").read_text(encoding="utf-8")
+    )
+    assert canonical["migrations"] == {"deepseek_provider_json": "imported"}
+    assert canonical["deepseek_model"] == "deepseek-v4-pro"
+    assert canonical["deepseek_reasoning_effort"] == "none"
+    assert "thinking_enabled" not in canonical
+    assert "api_key" not in canonical
+
+    legacy.write_text(
+        json.dumps({"model_id": "deepseek-v4-flash", "reasoning_effort": "low"}),
+        encoding="utf-8",
+    )
+    reloaded = _load_ai_provider_preference(data_root)
+    assert reloaded.deepseek_model == "deepseek-v4-pro"
+    assert reloaded.deepseek_reasoning_effort == "none"

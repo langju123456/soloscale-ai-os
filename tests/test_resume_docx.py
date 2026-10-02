@@ -8,22 +8,34 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from soloscale.content_canon import StoryReadiness, load_month_one_canon
 from soloscale.evidence_hub import EvidenceHub, EvidenceHubError
 from soloscale.knowledge_models import ContentRole, RetrievalHit, SourceKind
+from soloscale.local_ui import _build_resume_provenance_receipt
+from soloscale.model_gateway import (
+    GatewayConfigurationState,
+    GatewayDescriptor,
+    GatewayTransportScope,
+    ModelProviderId,
+)
 from soloscale.resume_docx import (
     ResumeTemplateError,
     ResumeValidationRuleCode,
+    TailoredDocx,
     _deterministic_hiring_signals,
+    _exact_role_strategy_model,
     _remove_trailing_empty_paragraphs,
+    _role_strategy_from_exact,
     _select_safe_rewrites,
     _validate_role_strategy,
+    apply_resume_expert_review,
     apply_resume_template_structure,
     extract_candidate_profile,
     read_template_paragraphs,
     tailor_resume_docx,
+    tailor_resume_docx_with_gateway,
 )
 from soloscale.resume_evidence_pack import (
     _compact_verified_facts,
@@ -39,6 +51,7 @@ from soloscale.resume_models import (
     ResumeAtomicFact,
     ResumeClaimProvenance,
     ResumeClaimVerificationStatus,
+    ResumeExpertReviewResult,
     RoleStrategy,
     build_resume_atomic_facts,
 )
@@ -131,6 +144,627 @@ def _template_docx() -> bytes:
     return target.getvalue()
 
 
+def _project_description_template_docx() -> bytes:
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("Search Project"),
+        _paragraph("Search project description."),
+        _paragraph("Built Python RAG retrieval.", bullet=True),
+        _paragraph("Platform Project"),
+        _paragraph("Platform project description."),
+        _paragraph("Shipped Docker automation.", bullet=True),
+        _paragraph("EDUCATION"),
+        _paragraph("M.S. Information Systems"),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def _chinese_literal_bullet_template_docx() -> bytes:
+    paragraphs = [
+        _paragraph("测试工程师"),
+        _paragraph("AI 应用工程师"),
+        _paragraph("项目经历"),
+        _paragraph("检索项目"),
+        _paragraph("• Built RAG retrieval service."),
+        _paragraph("教育背景"),
+        _paragraph("计算机科学硕士"),
+        _paragraph("专业技能"),
+        _paragraph("Python"),
+        _paragraph("Docker", bullet=True),
+        _paragraph("• RAG"),
+        _paragraph("工作经历"),
+        _paragraph("示例公司"),
+        _paragraph("• Delivered verified AI workflow."),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def _duplicate_claim_template_docx() -> bytes:
+    repeated = "Built Python evidence service."
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("SUMMARY"),
+        _paragraph("Evidence-grounded engineer."),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("Search Project"),
+        _paragraph(repeated, bullet=True),
+        _paragraph("Platform Project"),
+        _paragraph(repeated, bullet=True),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python, RAG", bullet=True),
+        _paragraph("Python, RAG", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("Example Company"),
+        _paragraph(repeated, bullet=True),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def _large_profile_template_docx(bullet_count: int = 100) -> bytes:
+    paragraphs = [
+        _paragraph("LANG JU"),
+        _paragraph("AI Engineer"),
+        _paragraph("SUMMARY"),
+        _paragraph("Evidence-grounded engineer."),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("Example Company"),
+        *[
+            _paragraph(f"Delivered verified resume result {index}.", bullet=True)
+            for index in range(1, bullet_count + 1)
+        ],
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    return target.getvalue()
+
+
+def test_ai_tailoring_accepts_duplicate_claim_and_skill_text_by_position() -> None:
+    template = _duplicate_claim_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02", "PROFILE-03"]
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Build Python evidence services.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01", "SKILL-02"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "SYNTHESIS",
+                            "text": profile.experience_bullets[0]
+                            if entry_id == "PROFILE-01"
+                            else profile.project_bullets[0],
+                            "source_fact_ids": [_fact_ids(profile, entry_id)[0]],
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve each positional claim.",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "Build Python evidence services.",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+
+    duplicate_bullets = [
+        paragraph
+        for paragraph in read_template_paragraphs(tailored.content)
+        if paragraph.is_bullet and paragraph.text == "Built Python evidence service."
+    ]
+    assert len(duplicate_bullets) == 3
+    assert tailored.rendered_profile_entry_ids == tuple(entry_ids)
+    assert tailored.role_strategy is not None
+    assert [
+        rewrite.profile_entry_id for rewrite in tailored.role_strategy.bullet_rewrites
+    ] == entry_ids
+    assert {
+        rewrite.kind for rewrite in tailored.role_strategy.bullet_rewrites
+    } == {"REWRITE"}
+
+    source_text = profile.project_bullets[0]
+    reviewed = apply_resume_expert_review(
+        tailored,
+        profile=profile,
+        job_description="Build Python evidence services.",
+        review=ResumeExpertReviewResult.model_validate(
+            {
+                "summary": "Tighten one positional project claim.",
+                "patches": [
+                    {
+                        "profile_entry_id": "PROFILE-02",
+                        "before_sha256": hashlib.sha256(
+                            source_text.encode("utf-8")
+                        ).hexdigest(),
+                        "after": "Built an evidence service with Python.",
+                        "new_factual_claims": [],
+                        "rationale": "Improve clarity without changing facts.",
+                    }
+                ],
+                "omitted_high_value_profile_entry_ids": [],
+            }
+        ),
+        expert_provider="test",
+        expert_model="test-model",
+    )
+    visible = [paragraph.text for paragraph in read_template_paragraphs(reviewed.content)]
+    assert visible[visible.index("Search Project") + 1] == (
+        "Built an evidence service with Python."
+    )
+    assert visible[visible.index("Platform Project") + 1] == source_text
+    assert visible[visible.index("Example Company") + 1] == source_text
+    assert reviewed.grounded_rewrites == 1
+    assert reviewed.unverified_rewrites == 0
+    assert reviewed.validation_diagnostics is not None
+    assert reviewed.validation_diagnostics.verified_count == 3
+    assert reviewed.validation_diagnostics.supported_count == 1
+
+
+def test_expert_review_zh_lexical_warning_is_unverified_not_supported() -> None:
+    template = _chinese_literal_bullet_template_docx()
+    profile = extract_candidate_profile(template)
+    entries = {
+        f"PROFILE-{index:02d}": text
+        for index, text in enumerate(
+            profile.experience_bullets + profile.project_bullets, start=1
+        )
+    }
+    facts = build_resume_atomic_facts(profile)
+    fact_ids_by_entry: dict[str, list[str]] = {}
+    for fact in facts:
+        fact_ids_by_entry.setdefault(fact.profile_entry_id, []).append(fact.fact_id)
+    strategy = RoleStrategy(
+        role_summary="检索工程岗位",
+        top_hiring_signals=["检索服务"],
+        evidence_priority=list(entries),
+        skill_priority=list(profile.skills),
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id=entry_id,
+                text=text,
+                source_profile_entry_ids=[entry_id],
+                source_fact_ids=fact_ids_by_entry[entry_id],
+            )
+            for entry_id, text in entries.items()
+        ],
+        rewrite_guidance="保留已批准事实。",
+    )
+    initial = TailoredDocx(
+        content=template,
+        template_sha256=hashlib.sha256(template).hexdigest(),
+        output_sha256=hashlib.sha256(template).hexdigest(),
+        project_blocks_reordered=0,
+        skill_bullets_reordered=0,
+        source_paragraph_count=len(read_template_paragraphs(template)),
+        claims_preserved=True,
+        output_locale="zh-CN",
+        role_strategy=strategy,
+        rendered_profile_entry_ids=tuple(entries),
+    )
+    source_text = entries["PROFILE-01"]
+    reviewed = apply_resume_expert_review(
+        initial,
+        profile=profile,
+        job_description="检索服务",
+        review=ResumeExpertReviewResult.model_validate(
+            {
+                "summary": "自然改写一个项目条目。",
+                "patches": [
+                    {
+                        "profile_entry_id": "PROFILE-01",
+                        "before_sha256": hashlib.sha256(
+                            source_text.encode("utf-8")
+                        ).hexdigest(),
+                        "after": "构建查询服务。",
+                        "new_factual_claims": [],
+                        "rationale": "压缩原有表述。",
+                    }
+                ],
+                "omitted_high_value_profile_entry_ids": [],
+            }
+        ),
+        expert_provider="test",
+        expert_model="test-model",
+    )
+
+    assert reviewed.grounded_rewrites == 0
+    assert reviewed.unverified_rewrites == 1
+    assert reviewed.validation_diagnostics is not None
+    assert reviewed.validation_diagnostics.supported_count == 0
+    assert [warning.claim_id for warning in reviewed.validation_diagnostics.editorial_warnings] == [
+        "PROFILE-01"
+    ]
+
+
+def test_expert_review_retains_rendered_zh_summary_warning() -> None:
+    paragraphs = [
+        _paragraph("测试工程师"),
+        _paragraph("AI 应用工程师"),
+        _paragraph("SUMMARY"),
+        _paragraph("Python RAG and Docker automation."),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("检索项目"),
+        _paragraph("Built Python RAG retrieval.", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("示例公司"),
+        _paragraph("Delivered Docker automation.", bullet=True),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python", bullet=True),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    template = target.getvalue()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02"]
+    source_by_id = dict(
+        zip(
+            entry_ids,
+            [*profile.experience_bullets, *profile.project_bullets],
+            strict=True,
+        )
+    )
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[BaseModel],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> BaseModel:
+            del system, user, reasoning_effort
+            return schema.model_validate(
+                {
+                    "role_summary": "检索工程岗位",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": source_by_id[entry_id],
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": {
+                        "text": "面向智能系统的工程实践。",
+                        "source_fact_ids": _fact_ids(
+                            profile, "PROFILE-01", "PROFILE-02"
+                        ),
+                    },
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "保留已批准事实。",
+                }
+            )
+
+    initial = tailor_resume_docx_with_gateway(
+        template,
+        "检索服务",
+        gateway=Gateway(),  # type: ignore[arg-type]
+        output_locale="zh-CN",
+    )
+    assert initial.summary_rewritten is True
+    assert initial.validation_diagnostics is not None
+    assert any(
+        warning.claim_id == "SUMMARY"
+        for warning in initial.validation_diagnostics.editorial_warnings
+    )
+    patch_source = source_by_id["PROFILE-02"]
+    reviewed = apply_resume_expert_review(
+        initial,
+        profile=profile,
+        job_description="检索服务",
+        review=ResumeExpertReviewResult.model_validate(
+            {
+                "summary": "编辑一个项目条目。",
+                "patches": [
+                    {
+                        "profile_entry_id": "PROFILE-02",
+                        "before_sha256": hashlib.sha256(
+                            patch_source.encode("utf-8")
+                        ).hexdigest(),
+                        "after": "构建 Python RAG 检索服务。",
+                        "new_factual_claims": [],
+                        "rationale": "压缩原有表述。",
+                    }
+                ],
+                "omitted_high_value_profile_entry_ids": [],
+            }
+        ),
+        expert_provider="test",
+        expert_model="test-model",
+    )
+
+    assert reviewed.summary_rewritten is True
+    assert reviewed.validation_diagnostics is not None
+    assert reviewed.unverified_rewrites == 1
+    assert any(
+        warning.claim_id == "SUMMARY"
+        for warning in reviewed.validation_diagnostics.editorial_warnings
+    )
+    provenance = _build_resume_provenance_receipt(
+        run_id="expert-summary-warning",
+        job_description="检索服务",
+        profile=profile,
+        tailored=reviewed,
+    )
+    assert provenance.claims[0].status == ResumeClaimVerificationStatus.UNVERIFIED
+
+
+def test_one_project_zh_resume_keeps_legacy_full_rewrite_map() -> None:
+    paragraphs = [
+        _paragraph("测试工程师"),
+        _paragraph("AI 应用工程师"),
+        _paragraph("SUMMARY"),
+        _paragraph("Python RAG 工程师。"),
+        _paragraph("PROJECT HIGHLIGHTS"),
+        _paragraph("检索项目"),
+        _paragraph("Built Python RAG retrieval.", bullet=True),
+        _paragraph("WORK EXPERIENCE"),
+        _paragraph("示例公司"),
+        _paragraph("Delivered Docker automation.", bullet=True),
+        _paragraph("TECHNICAL SKILLS"),
+        _paragraph("Python", bullet=True),
+    ]
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W_NS}"><w:body>'
+        + "".join(paragraphs)
+        + "<w:sectPr/></w:body></w:document>"
+    ).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"content-types")
+        archive.writestr("word/document.xml", document)
+    template = target.getvalue()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02"]
+    source_by_id = dict(
+        zip(
+            entry_ids,
+            [*profile.experience_bullets, *profile.project_bullets],
+            strict=True,
+        )
+    )
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[BaseModel],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> BaseModel:
+            del system, reasoning_effort
+            payload = json.loads(user)
+            assert "requested_edit_profile_entry_ids" not in payload
+            assert set(
+                schema.model_json_schema()["$defs"]["ExactBulletRewrites"][
+                    "properties"
+                ]
+            ) == set(entry_ids)
+            assert schema.model_json_schema()["properties"]["summary_rewrite"] != {
+                "type": "null"
+            }
+            return schema.model_validate(
+                {
+                    "role_summary": "检索工程岗位",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": source_by_id[entry_id],
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "保留已批准事实。",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "检索服务",
+        gateway=Gateway(),  # type: ignore[arg-type]
+        output_locale="zh-CN",
+    )
+
+    assert tailored.requested_edit_profile_entry_ids == ()
+    assert tailored.requested_project_material_rewrites == 0
+    assert tailored.requested_project_rewrite_quality_status == "NOT_APPLICABLE"
+
+
+def test_expert_review_contract_accepts_every_supported_profile_entry() -> None:
+    review = ResumeExpertReviewResult.model_validate(
+        {
+            "summary": "Review every supported profile entry.",
+            "patches": [
+                {
+                    "profile_entry_id": f"PROFILE-{index:02d}",
+                    "before_sha256": hashlib.sha256(
+                        f"before-{index}".encode()
+                    ).hexdigest(),
+                    "after": f"Evidence-preserving rewrite {index}.",
+                    "new_factual_claims": [],
+                    "rationale": "Improve clarity without changing facts.",
+                }
+                for index in range(1, 121)
+            ],
+            "omitted_high_value_profile_entry_ids": [],
+        }
+    )
+
+    assert len(review.patches) == 120
+    assert review.patches[-1].profile_entry_id == "PROFILE-120"
+
+
+def test_ai_tailoring_preserves_three_digit_profile_identity_and_provenance() -> None:
+    template = _large_profile_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = [f"PROFILE-{index:02d}" for index in range(1, 101)]
+    source_by_id = dict(zip(entry_ids, profile.experience_bullets, strict=True))
+    facts_by_entry: dict[str, list[str]] = {}
+    for fact in build_resume_atomic_facts(profile):
+        facts_by_entry.setdefault(fact.profile_entry_id, []).append(fact.fact_id)
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Deliver reliable resume systems.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": source_by_id[entry_id],
+                            "source_fact_ids": facts_by_entry[entry_id],
+                        }
+                        for entry_id in entry_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve every approved result.",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "Deliver reliable resume systems.",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    receipt = _build_resume_provenance_receipt(
+        run_id="resume-20260904T000000Z-three-digit",
+        job_description="Deliver reliable resume systems.",
+        profile=profile,
+        tailored=tailored,
+    )
+
+    assert tailored.rendered_profile_entry_ids[-1] == "PROFILE-100"
+    assert tailored.role_strategy is not None
+    assert len(tailored.role_strategy.bullet_rewrites) == 100
+    assert len(receipt.claims) == 101
+    assert receipt.claims[-1].claim_id == "CLAIM-101"
+    assert receipt.claims[-1].profile_entry_id == "PROFILE-100"
+
+
 def test_extract_profile_and_tailor_preserve_every_candidate_claim() -> None:
     template = _template_docx()
     profile = extract_candidate_profile(template)
@@ -164,6 +798,586 @@ def test_extract_profile_and_tailor_preserve_every_candidate_claim() -> None:
         for name in source.namelist():
             if name != "word/document.xml":
                 assert tailored.read(name) == source.read(name)
+
+
+def test_project_reordering_keeps_plain_descriptions_with_their_bullets() -> None:
+    template = _project_description_template_docx()
+    profile = extract_candidate_profile(template)
+    expected_project_order = [
+        "Platform Project",
+        "Platform project description.",
+        "Shipped Docker automation.",
+        "Search Project",
+        "Search project description.",
+        "Built Python RAG retrieval.",
+    ]
+
+    deterministic = tailor_resume_docx(template, "Required: Docker platform delivery")
+    deterministic_text = [
+        paragraph.text for paragraph in read_template_paragraphs(deterministic.content)
+    ]
+    start = deterministic_text.index("Platform Project")
+    assert deterministic_text[start : start + 6] == expected_project_order
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Prioritize platform delivery.",
+                    "evidence_priority": ["PROFILE-02", "PROFILE-01"],
+                    "skill_priority": [],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": text,
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id, text in zip(
+                            ["PROFILE-01", "PROFILE-02"],
+                            profile.project_bullets,
+                            strict=True,
+                        )
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve approved facts.",
+                }
+            )
+
+    prioritized = tailor_resume_docx_with_gateway(
+        template,
+        "Required: Docker platform delivery",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    prioritized_text = [
+        paragraph.text for paragraph in read_template_paragraphs(prioritized.content)
+    ]
+    start = prioritized_text.index("Platform Project")
+    assert prioritized_text[start : start + 6] == expected_project_order
+    assert sorted(prioritized_text) == sorted(
+        paragraph.text for paragraph in read_template_paragraphs(template)
+    )
+
+
+def test_chinese_literal_bullets_and_plain_skill_lines_reparse_after_tailoring() -> None:
+    template = _chinese_literal_bullet_template_docx()
+    profile = extract_candidate_profile(template)
+
+    assert profile.project_bullets == ["• Built RAG retrieval service."]
+    assert profile.experience_bullets == ["• Delivered verified AI workflow."]
+    assert profile.skills == ["Python", "Docker", "• RAG"]
+    assert profile.education == ["计算机科学硕士"]
+
+    tailored = tailor_resume_docx(template, "Docker")
+    reparsed = extract_candidate_profile(tailored.content)
+
+    assert reparsed.project_bullets == profile.project_bullets
+    assert reparsed.experience_bullets == profile.experience_bullets
+    assert reparsed.education == profile.education
+    visible = [item.text for item in read_template_paragraphs(tailored.content)]
+    assert visible[visible.index("专业技能") + 1 : visible.index("工作经历")] == [
+        "Docker", "Python", "• RAG"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output_locale", "required_prompt_fragments", "excluded_prompt_fragment"),
+    [
+        (
+            "zh-CN",
+            (
+                "可自然压缩、组合和重排重点，不要求保留每项细节或逐词对应",
+                "PROFILE key 绑定原始履历，不能按 evidence_priority 重新编号",
+                "target_fact_id 必须属于该 key",
+            ),
+            "Construct the strongest truthful one-page Application Resume",
+        ),
+        (
+            "en-US",
+            (
+                "Construct the strongest truthful one-page Application Resume",
+                "natural professional US English",
+                "A REWRITE may cite facts only from its target PROFILE entry",
+            ),
+            "至少对两条与 JD 最相关的项目 bullet 做实质改写",
+        ),
+    ],
+)
+def test_gateway_uses_locale_specific_resume_editor_prompt(
+    output_locale: str,
+    required_prompt_fragments: tuple[str, ...],
+    excluded_prompt_fragment: str,
+) -> None:
+    template = _template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02", "PROFILE-03"]
+    captured_system: list[str] = []
+    captured_user_payloads: list[dict[str, object]] = []
+    captured_rewrite_keys: list[set[str]] = []
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[BaseModel],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            request_payload = json.loads(user)
+            del reasoning_effort
+            captured_system.append(system)
+            captured_user_payloads.append(request_payload)
+            captured_rewrite_keys.append(
+                set(
+                    schema.model_json_schema()["$defs"]["ExactBulletRewrites"][
+                        "properties"
+                    ]
+                )
+            )
+            requested_ids = request_payload.get(
+                "requested_edit_profile_entry_ids", entry_ids
+            )
+            assert isinstance(requested_ids, list)
+            def rewrite_text(entry_id: str, text: str) -> str:
+                if output_locale == "zh-CN" and entry_id == "PROFILE-02":
+                    return "构建 Python RAG 检索服务。"
+                if output_locale == "zh-CN" and entry_id == "PROFILE-03":
+                    return "完成 Docker 与 Kubernetes 自动化交付。"
+                return text
+
+            return schema.model_validate(
+                {
+                    "role_summary": "Build Python RAG systems.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01", "SKILL-02"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": rewrite_text(entry_id, text),
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id, text in (
+                            (entry_id, text)
+                            for entry_id, text in zip(
+                            entry_ids,
+                            [
+                                *profile.experience_bullets,
+                                *profile.project_bullets,
+                            ],
+                            strict=True,
+                            )
+                            if entry_id in requested_ids
+                        )
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve approved facts.",
+                }
+            )
+
+    job_description = "Build Python RAG systems."
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        job_description,
+        gateway=Gateway(),  # type: ignore[arg-type]
+        output_locale=output_locale,  # type: ignore[arg-type]
+    )
+
+    assert len(captured_system) == 1
+    assert all(fragment in captured_system[0] for fragment in required_prompt_fragments)
+    assert len(captured_user_payloads) == 1
+    assert excluded_prompt_fragment not in captured_system[0]
+    assert captured_system[0].endswith(
+        json.dumps(_deterministic_hiring_signals(job_description), ensure_ascii=False)
+    )
+    if output_locale == "zh-CN":
+        prompt_length = len(captured_system[0]) - len(
+            json.dumps(_deterministic_hiring_signals(job_description), ensure_ascii=False)
+        )
+        assert 600 <= prompt_length <= 900
+        assert "只编辑以下两个项目 PROFILE" in captured_system[0]
+        assert captured_rewrite_keys == [{"PROFILE-02", "PROFILE-03"}]
+        assert captured_user_payloads[0]["requested_edit_profile_entry_ids"] == [
+            "PROFILE-02",
+            "PROFILE-03",
+        ]
+    else:
+        assert captured_rewrite_keys == [set(entry_ids)]
+        assert "requested_edit_profile_entry_ids" not in captured_user_payloads[0]
+    assert tailored.validation_diagnostics is not None
+    assert tailored.validation_diagnostics.validator_status == "accepted"
+    assert tailored.validation_diagnostics.rejected_count == 0
+    assert (
+        tailored.validation_diagnostics.verified_count
+        + tailored.validation_diagnostics.supported_count
+        + tailored.validation_diagnostics.unverified_count
+        == tailored.validation_diagnostics.candidate_count
+    )
+    assert tailored.rendered_profile_entry_ids == tuple(entry_ids)
+    if output_locale == "zh-CN":
+        assert tailored.grounded_rewrites == 2
+        assert tailored.unverified_rewrites == 0
+        assert tailored.validation_diagnostics.supported_count == 2
+        assert tailored.validation_diagnostics.unverified_count == 0
+        assert tailored.requested_edit_profile_entry_ids == (
+            "PROFILE-02",
+            "PROFILE-03",
+        )
+        assert tailored.requested_project_material_rewrites == 2
+        assert tailored.requested_project_rewrite_quality_status == "QUALITY_MET"
+        receipt = _build_resume_provenance_receipt(
+            run_id="resume-zh-editorial-warning",
+            job_description=job_description,
+            profile=profile,
+            tailored=tailored,
+        )
+        assert receipt.all_exported_claims_supported is True
+
+
+def test_fixed_rewrite_wire_slot_restricts_target_and_keeps_cross_profile_support() -> None:
+    profile = CandidateProfile(
+        skills=["RAG"],
+        project_bullets=["Built RAG retrieval.", "Added FastAPI orchestration."],
+    )
+    fact_ids = _fact_ids(profile, "PROFILE-01", "PROFILE-02")
+    schema = _exact_role_strategy_model(
+        ["PROFILE-01", "PROFILE-02"],
+        skill_ids=["SKILL-01"],
+        fact_ids=fact_ids,
+        include_summary=False,
+    )
+    payload = {
+        "role_summary": "RAG role",
+        "evidence_priority": ["PROFILE-01", "PROFILE-02"],
+        "skill_priority": ["SKILL-01"],
+        "bullet_rewrites": {
+            "PROFILE-01": {
+                "kind": "SYNTHESIS",
+                "text": "Built RAG retrieval with FastAPI orchestration.",
+                "target_fact_id": _fact_ids(profile, "PROFILE-01")[0],
+                "supporting_fact_ids": _fact_ids(profile, "PROFILE-02"),
+            },
+            "PROFILE-02": {
+                "kind": "REWRITE",
+                "text": "Added FastAPI orchestration.",
+                "target_fact_id": _fact_ids(profile, "PROFILE-02")[0],
+                "supporting_fact_ids": [],
+            },
+        },
+        "summary_rewrite": None,
+        "unsupported_requirements": [],
+        "rewrite_guidance": "Preserve approved facts.",
+    }
+    exact = schema.model_validate(payload)
+    strategy = _role_strategy_from_exact(
+        exact,
+        entry_ids=["PROFILE-01", "PROFILE-02"],
+        sanitized_skill_by_id={"SKILL-01": "RAG"},
+        fact_source_by_id={
+            fact_id: "PROFILE-01" if "PROFILE-01" in fact_id else "PROFILE-02"
+            for fact_id in fact_ids
+        },
+        top_hiring_signals=["Required: RAG and FastAPI."],
+    )
+    assert strategy.bullet_rewrites[0].profile_entry_id == "PROFILE-01"
+    assert strategy.bullet_rewrites[0].source_profile_entry_ids == [
+        "PROFILE-01",
+        "PROFILE-02",
+    ]
+    invalid = json.loads(json.dumps(payload))
+    invalid["bullet_rewrites"]["PROFILE-01"]["target_fact_id"] = _fact_ids(
+        profile, "PROFILE-02"
+    )[0]
+    with pytest.raises(ValidationError):
+        schema.model_validate(invalid)
+    legacy = json.loads(json.dumps(payload))
+    legacy["bullet_rewrites"]["PROFILE-01"] = {
+        "kind": "SYNTHESIS",
+        "text": "Built RAG retrieval with FastAPI orchestration.",
+        "source_fact_ids": fact_ids,
+    }
+    legacy_exact = schema.model_validate(legacy).model_dump(mode="json")
+    assert legacy_exact["bullet_rewrites"]["PROFILE-01"]["target_fact_id"] == fact_ids[0]
+    reversed_legacy = json.loads(json.dumps(legacy))
+    reversed_legacy["bullet_rewrites"]["PROFILE-01"]["source_fact_ids"] = [
+        *_fact_ids(profile, "PROFILE-02"),
+        *_fact_ids(profile, "PROFILE-01"),
+    ]
+    reversed_exact = schema.model_validate(reversed_legacy).model_dump(mode="json")
+    assert reversed_exact["bullet_rewrites"]["PROFILE-01"] == {
+        "kind": "SYNTHESIS",
+        "text": "Built RAG retrieval with FastAPI orchestration.",
+        "target_fact_id": _fact_ids(profile, "PROFILE-01")[0],
+        "supporting_fact_ids": [
+            *_fact_ids(profile, "PROFILE-02"),
+            *_fact_ids(profile, "PROFILE-01")[1:],
+        ],
+    }
+    missing_target_legacy = json.loads(json.dumps(legacy))
+    missing_target_legacy["bullet_rewrites"]["PROFILE-01"]["source_fact_ids"] = (
+        _fact_ids(profile, "PROFILE-02")
+    )
+    with pytest.raises(ValidationError):
+        schema.model_validate(missing_target_legacy)
+    focused_schema = _exact_role_strategy_model(
+        ["PROFILE-01", "PROFILE-02"],
+        skill_ids=["SKILL-01"],
+        fact_ids=fact_ids,
+        include_summary=False,
+        requested_edit_ids=("PROFILE-01", "PROFILE-02"),
+    )
+    assert set(
+        focused_schema.model_json_schema()["$defs"]["ExactBulletRewrites"][
+            "properties"
+        ]
+    ) == {"PROFILE-01", "PROFILE-02"}
+    foreign = json.loads(json.dumps(payload))
+    foreign["bullet_rewrites"]["PROFILE-03"] = foreign["bullet_rewrites"][
+        "PROFILE-01"
+    ]
+    with pytest.raises(ValidationError):
+        focused_schema.model_validate(foreign)
+
+
+@pytest.mark.parametrize(
+    ("project_texts", "expected_count", "expected_status"),
+    [
+        (
+            {
+                "PROFILE-02": "Built Python RAG retrieval.",
+                "PROFILE-03": "Shipped Docker and Kubernetes automation.",
+            },
+            0,
+            "QUALITY_NOT_MET",
+        ),
+        (
+            {
+                "PROFILE-02": "Created Python RAG retrieval.",
+                "PROFILE-03": "Delivered Docker and Kubernetes automation.",
+            },
+            0,
+            "QUALITY_NOT_MET",
+        ),
+        (
+            {
+                "PROFILE-02": "构建 Python RAG 检索服务。",
+                "PROFILE-03": "完成 Docker 与 Kubernetes 自动化交付。",
+            },
+            2,
+            "QUALITY_MET",
+        ),
+    ],
+)
+def test_focused_project_quality_counts_only_material_final_requested_edits(
+    project_texts: dict[str, str], expected_count: int, expected_status: str
+) -> None:
+    template = _template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02", "PROFILE-03"]
+    source_by_id = dict(
+        zip(
+            entry_ids,
+            [*profile.experience_bullets, *profile.project_bullets],
+            strict=True,
+        )
+    )
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, reasoning_effort
+            requested_ids = json.loads(user)["requested_edit_profile_entry_ids"]
+            assert requested_ids == ["PROFILE-02", "PROFILE-03"]
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "Build Python RAG systems.",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-01", "SKILL-02"],
+                    "bullet_rewrites": {
+                        entry_id: {
+                            "kind": "REWRITE",
+                            "text": project_texts[entry_id],
+                            "source_fact_ids": _fact_ids(profile, entry_id),
+                        }
+                        for entry_id in requested_ids
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve approved facts.",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "Build Python RAG systems.",
+        gateway=Gateway(),  # type: ignore[arg-type]
+        output_locale="zh-CN",
+    )
+
+    assert tailored.requested_edit_profile_entry_ids == ("PROFILE-02", "PROFILE-03")
+    assert tailored.requested_project_material_rewrites == expected_count
+    assert tailored.requested_project_rewrite_quality_status == expected_status
+    assert tailored.role_strategy is not None
+    assert next(
+        rewrite.text
+        for rewrite in tailored.role_strategy.bullet_rewrites
+        if rewrite.profile_entry_id == "PROFILE-01"
+    ) == source_by_id["PROFILE-01"]
+
+
+def test_chinese_lexical_anchor_warning_survives_as_unverified_provenance() -> None:
+    source = "搭建本地检索服务"
+    profile = CandidateProfile(project_bullets=[source])
+    strategy = RoleStrategy(
+        role_summary="检索工程岗位",
+        top_hiring_signals=["检索服务"],
+        evidence_priority=["PROFILE-01"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="构建查询工作流",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            )
+        ],
+        rewrite_guidance="自然改写且不增加事实。",
+    )
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        strategy,
+        profile=profile,
+        job_description="检索服务",
+        output_locale="zh-CN",
+    )
+    assert diagnostics.rejected_count == 0
+    assert [warning.code for warning in diagnostics.editorial_warnings] == [
+        "LEXICAL_ANCHOR_NOT_CONFIRMED"
+    ]
+
+
+def test_ai_literal_bullet_rewrite_restores_original_marker_and_provenance() -> None:
+    template = _chinese_literal_bullet_template_docx()
+    profile = extract_candidate_profile(template)
+    entry_ids = ["PROFILE-01", "PROFILE-02"]
+    fact_ids = {
+        entry_id: _fact_ids(profile, entry_id)
+        for entry_id in entry_ids
+    }
+
+    class Gateway:
+        descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OLLAMA,
+            display_name="Local test model",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.LOOPBACK,
+            model="test-model",
+            base_url="http://127.0.0.1:11434",
+        )
+        last_call_profile = None
+
+        def complete(
+            self,
+            schema: type[object],
+            *,
+            system: str,
+            user: str,
+            reasoning_effort: str = "none",
+        ) -> object:
+            del system, user, reasoning_effort
+            return schema.model_validate(  # type: ignore[attr-defined]
+                {
+                    "role_summary": "构建 AI 工作流。",
+                    "evidence_priority": entry_ids,
+                    "skill_priority": ["SKILL-03", "SKILL-02", "SKILL-01"],
+                    "bullet_rewrites": {
+                        "PROFILE-01": {
+                            "kind": "REWRITE",
+                            "text": "• Delivered verified AI workflow.",
+                            "source_fact_ids": fact_ids["PROFILE-01"],
+                        },
+                        "PROFILE-02": {
+                            "kind": "REWRITE",
+                            "text": "Built RAG retrieval service.",
+                            "source_fact_ids": fact_ids["PROFILE-02"],
+                        },
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "保留已批准事实。",
+                }
+            )
+
+    tailored = tailor_resume_docx_with_gateway(
+        template,
+        "RAG Docker Python",
+        gateway=Gateway(),  # type: ignore[arg-type]
+    )
+    receipt = _build_resume_provenance_receipt(
+        run_id="resume-20260930T000000Z-chinese-literal",
+        job_description="RAG Docker Python",
+        profile=profile,
+        tailored=tailored,
+    )
+
+    reparsed = extract_candidate_profile(tailored.content)
+    assert reparsed.project_bullets == ["• Built RAG retrieval service."]
+    assert reparsed.experience_bullets == ["• Delivered verified AI workflow."]
+    assert reparsed.skills == ["• RAG", "Docker", "Python"]
+    assert tailored.rendered_profile_entry_ids == tuple(entry_ids)
+    assert tailored.role_strategy is not None
+    assert [rewrite.text for rewrite in tailored.role_strategy.bullet_rewrites] == [
+        "• Delivered verified AI workflow.",
+        "• Built RAG retrieval service.",
+    ]
+    assert tailored.grounded_rewrites == 0
+    assert tailored.validation_diagnostics is not None
+    assert tailored.validation_diagnostics.verified_count == 2
+    assert tailored.validation_diagnostics.supported_count == 0
+    assert all(not item.accepted and not item.rendered for item in tailored.evidence_adoption)
+    assert [claim.profile_entry_id for claim in receipt.claims] == entry_ids
 
 
 def test_external_template_reorders_sections_without_importing_body_copy() -> None:
@@ -234,6 +1448,7 @@ def test_hiring_signal_must_be_an_exact_jd_quote() -> None:
         "rejected_count": 0,
         "duplicate_count": 0,
         "source_span_failure_count": 1,
+        "unverified_count": 0,
     }
 
 
@@ -710,6 +1925,102 @@ def test_selective_rewrite_keeps_supported_claim_and_restores_rejected_claim() -
     } >= {ResumeValidationRuleCode.CLAIM_TECHNOLOGY_INFLATION}
 
 
+def test_chinese_source_copies_without_literal_bullets_pass_the_anchor_gate() -> None:
+    first_source = "• 负责AI应用开发"
+    second_source = "• 维护本地检索系统"
+    profile = CandidateProfile(project_bullets=[first_source, second_source])
+    strategy = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="负责 AI 应用开发",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+        rewrite_guidance="Preserve approved facts.",
+    )
+
+    _validate_role_strategy(
+        strategy,
+        profile=profile,
+        job_description="Required: AI application development.",
+        output_locale="zh-CN",
+    )
+
+
+def test_chinese_exact_identity_does_not_bypass_mutation_or_missing_synthesis_fact() -> None:
+    first_source = "• 负责AI应用开发"
+    second_source = "• 维护本地检索系统"
+    profile = CandidateProfile(project_bullets=[first_source, second_source])
+    mutated = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        rewrite_guidance="Preserve approved facts.",
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="主导AI应用开发",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+    )
+    with pytest.raises(ResumeTemplateError) as mutated_error:
+        _validate_role_strategy(
+            mutated,
+            profile=profile,
+            job_description="Required: AI application development.",
+            output_locale="zh-CN",
+        )
+    assert mutated_error.value.validation_diagnostics is not None
+    assert mutated_error.value.validation_diagnostics.failures
+
+    missing_second_fact = RoleStrategy(
+        role_summary="AI application role",
+        top_hiring_signals=["Required: AI application development."],
+        evidence_priority=["PROFILE-01", "PROFILE-02"],
+        rewrite_guidance="Preserve approved facts.",
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                kind="SYNTHESIS",
+                text="负责AI应用开发",
+                source_profile_entry_ids=["PROFILE-01", "PROFILE-02"],
+                source_fact_ids=_fact_ids(profile, "PROFILE-01", "PROFILE-02"),
+            ),
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-02",
+                text="维护本地检索系统",
+                source_fact_ids=_fact_ids(profile, "PROFILE-02"),
+            ),
+        ],
+    )
+    _entries, synthesis_warnings = _validate_role_strategy(
+        missing_second_fact,
+        profile=profile,
+        job_description="Required: AI application development.",
+        output_locale="zh-CN",
+        return_editorial_warnings=True,
+    )
+    assert any(
+        warning.fact_id.startswith("FACT-PROFILE-02-")
+        for warning in synthesis_warnings
+    )
+
+
 def test_multi_source_synthesis_uses_union_and_falls_back_only_unsafe_slots() -> None:
     first_source = "Built RAG retrieval."
     second_source = "Added FastAPI orchestration."
@@ -809,18 +2120,18 @@ def test_chinese_editorial_synthesis_keeps_fact_boundary_and_rejects_inflation()
             GroundedResumeBulletRewrite(
                 profile_entry_id="PROFILE-01",
                 kind="SYNTHESIS",
-                text="设计并实现 RAG 检索与 FastAPI 编排工作流。",
+                text="设计查询与服务协作流程。",
                 source_profile_entry_ids=["PROFILE-01", "PROFILE-02"],
                 source_fact_ids=fact_ids,
             ),
             GroundedResumeBulletRewrite(
                 profile_entry_id="PROFILE-02",
-                text="通过 FastAPI 完成服务编排。",
+                text="完成服务协作编排。",
                 source_fact_ids=_fact_ids(profile, "PROFILE-02"),
             ),
         ],
         summary_rewrite=GroundedResumeSummaryRewrite(
-            text="专注于 RAG 检索与 FastAPI 编排的证据驱动工程师。",
+            text="专注于查询与服务协作的证据驱动工程师。",
             source_profile_entry_ids=["PROFILE-01", "PROFILE-02"],
             source_fact_ids=fact_ids,
         ),
@@ -839,6 +2150,13 @@ def test_chinese_editorial_synthesis_keeps_fact_boundary_and_rejects_inflation()
     ]
     assert selected.bullet_rewrites[0].kind == "SYNTHESIS"
     assert selected.summary_rewrite is not None
+    assert {
+        warning.claim_id for warning in diagnostics.editorial_warnings
+    } >= {"PROFILE-01", "SUMMARY"}
+    assert any(
+        warning.fact_id.startswith("FACT-PROFILE-02-")
+        for warning in diagnostics.editorial_warnings
+    )
 
     inflated_payload = safe.model_dump(mode="json")
     inflated_payload["bullet_rewrites"][0]["text"] = (
@@ -862,6 +2180,67 @@ def test_chinese_editorial_synthesis_keeps_fact_boundary_and_rejects_inflation()
         ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION,
         ResumeValidationRuleCode.CLAIM_NEW_NUMBER,
     }
+
+
+def test_chinese_rewrite_rejects_unmeasured_outcome_and_keeps_mechanism() -> None:
+    source = "实现 RAG 检索，通过引用和来源哈希支持结果追溯。"
+    profile = CandidateProfile(skills=["RAG"], project_bullets=[source])
+    strategy = RoleStrategy(
+        role_summary="RAG role",
+        top_hiring_signals=["Required: RAG."],
+        evidence_priority=["PROFILE-01"],
+        skill_priority=["RAG"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="通过引用和来源哈希追溯 RAG 检索结果，提升模型输出的准确性。",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+        ],
+        rewrite_guidance="仅使用来源事实。",
+    )
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        strategy, profile=profile, job_description="Required: RAG.", output_locale="zh-CN"
+    )
+    assert selected.bullet_rewrites[0].text == source
+    assert ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION in {
+        failure.rule_code for failure in diagnostics.failures
+    }
+
+    payload = strategy.model_dump(mode="json")
+    payload["bullet_rewrites"][0]["text"] = "通过引用和来源哈希追溯 RAG 检索结果。"
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        RoleStrategy.model_validate(payload),
+        profile=profile,
+        job_description="Required: RAG.",
+        output_locale="zh-CN",
+    )
+    assert selected.bullet_rewrites[0].text == payload["bullet_rewrites"][0]["text"]
+    assert diagnostics.validator_status == "accepted"
+
+
+def test_chinese_rewrite_allows_source_supported_improvement_translation() -> None:
+    source = "Improved RAG retrieval accuracy."
+    profile = CandidateProfile(skills=["RAG"], project_bullets=[source])
+    strategy = RoleStrategy(
+        role_summary="RAG role",
+        top_hiring_signals=["Required: RAG."],
+        evidence_priority=["PROFILE-01"],
+        skill_priority=["RAG"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="提升 RAG 检索准确性。",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+        ],
+        rewrite_guidance="仅使用来源事实。",
+    )
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        strategy, profile=profile, job_description="Required: RAG.", output_locale="zh-CN"
+    )
+    assert selected.bullet_rewrites[0].text == "提升 RAG 检索准确性。"
+    assert diagnostics.validator_status == "accepted"
 
 
 def test_cross_locale_fact_match_accepts_chinese_facts_in_english() -> None:

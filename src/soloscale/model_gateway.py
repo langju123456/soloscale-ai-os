@@ -10,6 +10,8 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol, TypeVar, cast
 from urllib.parse import urlsplit
@@ -21,6 +23,7 @@ from soloscale.evidence_agent import (
     OllamaReasoner,
     Reasoner,
     ReasonerInvalidResponseError,
+    ReasonerTimeoutError,
     ReasonerTransportError,
 )
 from soloscale.models import ContractModel
@@ -33,11 +36,17 @@ _HOSTED_DEFAULT_MODEL = "zai/glm-5.2"
 _HOSTED_REQUEST_TIMEOUT_SECONDS = 105
 _HOSTED_MAX_RETRIES = 0
 _HOSTED_MAX_OUTPUT_TOKENS = 8_192
+_DEEPSEEK_MAX_OUTPUT_TOKENS = 16_384
 _HOSTED_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _HOSTED_MAX_ERROR_BYTES = 64 * 1024
 _TRANSIENT_HTTP_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _SAFE_GATEWAY_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 _OPENAI_COMPATIBLE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}$")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_RESPONSES_URL = f"{DEEPSEEK_BASE_URL}/responses"
+DEEPSEEK_MODELS_URL = f"{DEEPSEEK_BASE_URL}/models"
+DEEPSEEK_MODEL_IDS = ("deepseek-v4-flash", "deepseek-v4-pro")
+DEEPSEEK_REASONING_EFFORTS = ("none", "low", "high", "max")
 
 
 class ModelProviderId(StrEnum):
@@ -46,6 +55,55 @@ class ModelProviderId(StrEnum):
     SOLOSCALE_HOSTED = "soloscale_hosted"
     OLLAMA = "ollama"
     OPENAI_COMPATIBLE = "openai_compatible"
+    DEEPSEEK = "deepseek"
+
+
+@dataclass(frozen=True)
+class ModelProviderCatalogEntry:
+    """One product-facing provider identity and its stable settings route."""
+
+    provider: ModelProviderId
+    display_name: str
+    settings_path: str
+    default_model: str
+
+
+MODEL_PROVIDER_CATALOG = (
+    ModelProviderCatalogEntry(
+        provider=ModelProviderId.OLLAMA,
+        display_name="Local AI",
+        settings_path="/settings/ai/local",
+        default_model="qwen3:8b",
+    ),
+    ModelProviderCatalogEntry(
+        provider=ModelProviderId.SOLOSCALE_HOSTED,
+        display_name="SoloScale Hosted AI",
+        settings_path="/settings/ai/hosted",
+        default_model=_HOSTED_DEFAULT_MODEL,
+    ),
+    ModelProviderCatalogEntry(
+        provider=ModelProviderId.OPENAI_COMPATIBLE,
+        display_name="OpenAI API",
+        settings_path="/settings/ai/openai",
+        default_model="gpt-5",
+    ),
+    ModelProviderCatalogEntry(
+        provider=ModelProviderId.DEEPSEEK,
+        display_name="DeepSeek",
+        settings_path="/settings/ai/deepseek",
+        default_model=DEEPSEEK_MODEL_IDS[0],
+    ),
+)
+
+
+def model_provider_catalog_entry(
+    provider: ModelProviderId | str,
+) -> ModelProviderCatalogEntry:
+    selected = ModelProviderId(provider)
+    for entry in MODEL_PROVIDER_CATALOG:
+        if entry.provider is selected:
+            return entry
+    raise AssertionError(f"provider catalog is incomplete for {selected.value}")
 
 
 class GatewayConfigurationState(StrEnum):
@@ -103,7 +161,9 @@ class ModelCallProfile(ContractModel):
     user_chars: int = Field(ge=0)
     schema_chars: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
+    requested_context_tokens: int | None = Field(default=None, ge=1)
     thinking_enabled: bool
+    reasoning_effort: Literal["none", "low", "high", "max"] = "none"
     prompt_eval_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     wall_ms: int = Field(ge=0)
@@ -135,6 +195,10 @@ class ModelGatewayNotConfigured(ModelGatewayError):
 
 class ModelGatewayTransportError(ModelGatewayError):
     """The configured provider could not be reached safely."""
+
+
+class ModelGatewayTimeoutError(ModelGatewayTransportError):
+    """The configured provider exceeded its processing deadline."""
 
 
 class ModelGatewayInvalidResponse(ModelGatewayError):
@@ -207,6 +271,30 @@ class OpenAICompatibleGatewayTransport(Protocol):
     def send(self, request: OpenAICompatibleGatewayRequest) -> str: ...
 
 
+class DeepSeekResponsesRequest(ContractModel):
+    """Ephemeral structured-output request for DeepSeek's Responses API."""
+
+    correlation_id: str = Field(pattern=r"^gateway-[a-f0-9]{24}$")
+    endpoint: Literal["https://api.deepseek.com/responses"] = (
+        "https://api.deepseek.com/responses"
+    )
+    model: Literal["deepseek-v4-flash", "deepseek-v4-pro"]
+    system: str
+    user: str
+    response_json_schema: dict[str, object]
+    reasoning_effort: Literal["none", "low", "high", "max"] = "low"
+    max_output_tokens: int = Field(
+        default=_DEEPSEEK_MAX_OUTPUT_TOKENS, ge=1, le=64_000
+    )
+    timeout_seconds: int = Field(ge=1, le=120)
+
+
+class DeepSeekResponsesTransport(Protocol):
+    """Narrow transport seam for DeepSeek Responses requests."""
+
+    def send(self, request: DeepSeekResponsesRequest) -> str: ...
+
+
 def _external_model_call_profile(
     *,
     provider: ModelProviderId,
@@ -215,7 +303,7 @@ def _external_model_call_profile(
     user: str,
     response_json_schema: dict[str, object],
     max_output_tokens: int,
-    reasoning_effort: Literal["none", "low"],
+    reasoning_effort: Literal["none", "low", "high", "max"],
     wall_ms: int,
     response_chars: int,
 ) -> ModelCallProfile:
@@ -236,6 +324,7 @@ def _external_model_call_profile(
         ),
         max_output_tokens=max_output_tokens,
         thinking_enabled=reasoning_effort != "none",
+        reasoning_effort=reasoning_effort,
         prompt_eval_tokens=None,
         output_tokens=None,
         wall_ms=wall_ms,
@@ -261,6 +350,21 @@ def _safe_gateway_value(value: object) -> str | None:
         return None
     selected = str(value).strip()
     return selected if _SAFE_GATEWAY_VALUE.fullmatch(selected) else None
+
+
+def _deepseek_structured_json(response: str) -> object:
+    """Decode raw JSON or one complete provider-added JSON code fence."""
+
+    candidate = response.strip().lstrip("\ufeff")
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if (
+            len(lines) >= 3
+            and lines[0].strip().casefold() in {"```", "```json"}
+            and lines[-1].strip() == "```"
+        ):
+            candidate = "\n".join(lines[1:-1]).strip()
+    return json.loads(candidate)
 
 
 def _first_safe_gateway_value(
@@ -758,6 +862,347 @@ class OpenAICompatibleModelGateway:
             ) from None
 
 
+class DeepSeekResponsesHTTPTransport:
+    """Bounded DeepSeek Responses transport that never logs its credential."""
+
+    def __init__(self, credential: str) -> None:
+        selected = credential.strip()
+        if not selected:
+            raise ValueError("DeepSeek credential must not be empty")
+        self._credential = selected
+
+    @staticmethod
+    def _provider_schema(schema: dict[str, object]) -> dict[str, object]:
+        """Add explicit types required by DeepSeek's structured-output parser."""
+
+        projected = OpenAICompatibleHTTPTransport._provider_schema(schema)
+        definitions = projected.get("$defs")
+
+        def resolved_schema(value: object) -> dict[str, object] | None:
+            if not isinstance(value, dict):
+                return None
+            reference = value.get("$ref")
+            if (
+                isinstance(reference, str)
+                and reference.startswith("#/$defs/")
+                and isinstance(definitions, dict)
+            ):
+                target = definitions.get(reference.removeprefix("#/$defs/"))
+                return target if isinstance(target, dict) else None
+            return value
+
+        def declared_types(value: object) -> list[str]:
+            resolved = resolved_schema(value)
+            if resolved is None:
+                return []
+            raw_type = resolved.get("type")
+            if isinstance(raw_type, str):
+                return [raw_type]
+            if isinstance(raw_type, list) and all(
+                isinstance(item, str) for item in raw_type
+            ):
+                return list(raw_type)
+            return []
+
+        def add_explicit_types(value: object) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    add_explicit_types(item)
+                return
+            if not isinstance(value, dict):
+                return
+            variants = value.get("anyOf")
+            if "type" not in value and isinstance(variants, list):
+                inferred = list(
+                    dict.fromkeys(
+                        item_type
+                        for variant in variants
+                        for item_type in declared_types(variant)
+                    )
+                )
+                composite_types = [
+                    item_type
+                    for item_type in inferred
+                    if item_type in {"object", "array"}
+                ]
+                composite_variants = [
+                    resolved
+                    for variant in variants
+                    if (resolved := resolved_schema(variant)) is not None
+                    and resolved.get("type") in {"object", "array"}
+                ]
+                if len(composite_variants) == 1 and set(inferred) <= {
+                    composite_types[0],
+                    "null",
+                }:
+                    preserved = {
+                        key: item for key, item in value.items() if key != "anyOf"
+                    }
+                    value.clear()
+                    value.update(deepcopy(composite_variants[0]))
+                    value.update(preserved)
+                elif inferred:
+                    value["type"] = inferred[0] if len(inferred) == 1 else inferred
+            for item in value.values():
+                add_explicit_types(item)
+
+        add_explicit_types(projected)
+        return projected
+
+    @staticmethod
+    def _extract_content(raw: bytes) -> str:
+        try:
+            envelope = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ModelGatewayInvalidResponse(
+                "DeepSeek returned an invalid response envelope"
+            ) from None
+        if not isinstance(envelope, dict):
+            raise ModelGatewayInvalidResponse(
+                "DeepSeek returned an invalid response envelope"
+            )
+        direct = envelope.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        output = envelope.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") != "message":
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if (
+                        isinstance(part, dict)
+                        and part.get("type") == "output_text"
+                        and isinstance(part.get("text"), str)
+                    ):
+                        text = str(part["text"]).strip()
+                        if text:
+                            return text
+        raise ModelGatewayInvalidResponse("DeepSeek returned an empty response")
+
+    def send(self, request: DeepSeekResponsesRequest) -> str:
+        provider_schema = self._provider_schema(request.response_json_schema)
+        body = json.dumps(
+            {
+                "model": request.model,
+                "input": [
+                    {"role": "system", "content": request.system},
+                    {"role": "user", "content": request.user},
+                ],
+                "stream": False,
+                "reasoning": {"effort": request.reasoning_effort},
+                "max_output_tokens": request.max_output_tokens,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": VercelAIGatewayHTTPTransport._schema_name(
+                            request.response_json_schema
+                        ),
+                        "strict": True,
+                        "schema": provider_schema,
+                    }
+                },
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        outbound = urllib.request.Request(
+            request.endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._credential}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "SoloScale/1.0",
+            },
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(
+                outbound, timeout=request.timeout_seconds
+            ) as response:
+                raw = response.read(_HOSTED_MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            details = GatewayFailureDetails(
+                correlation_id=request.correlation_id,
+                model=request.model,
+                category=_gateway_error_category(
+                    status=exc.code,
+                    error_type=None,
+                    error_code=None,
+                ),
+                upstream_http_status=exc.code,
+                gateway_error_type="deepseek_http_error",
+                gateway_error_code=f"http_{exc.code}",
+                provider=ModelProviderId.DEEPSEEK.value,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                retryable=exc.code in _TRANSIENT_HTTP_STATUS,
+            )
+            exc.close()
+            _log_gateway_failure(details)
+            raise ModelGatewayTransportError(
+                "DeepSeek request failed", details=details
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            timed_out = isinstance(exc, TimeoutError) or isinstance(
+                getattr(exc, "reason", None), TimeoutError
+            )
+            details = GatewayFailureDetails(
+                correlation_id=request.correlation_id,
+                model=request.model,
+                category=(
+                    GatewayErrorCategory.TIMEOUT
+                    if timed_out
+                    else GatewayErrorCategory.UPSTREAM
+                ),
+                gateway_error_type=(
+                    "timeout" if timed_out else "transport_connection_error"
+                ),
+                gateway_error_code=(
+                    "request_timeout" if timed_out else "connection_failed"
+                ),
+                provider=ModelProviderId.DEEPSEEK.value,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                retryable=True,
+            )
+            _log_gateway_failure(details)
+            raise ModelGatewayTransportError(
+                "DeepSeek request failed", details=details
+            ) from None
+        if len(raw) > _HOSTED_MAX_RESPONSE_BYTES:
+            raise ModelGatewayInvalidResponse(
+                "DeepSeek response exceeded the size limit"
+            )
+        return self._extract_content(raw)
+
+
+class DeepSeekModelGateway:
+    """First-class DeepSeek adapter inside the canonical ModelGateway boundary."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str,
+        transport: DeepSeekResponsesTransport,
+    ) -> None:
+        if model not in DEEPSEEK_MODEL_IDS:
+            raise ValueError("DeepSeek model is invalid")
+        if reasoning_effort not in DEEPSEEK_REASONING_EFFORTS:
+            raise ValueError("DeepSeek reasoning effort is invalid")
+        self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._transport = transport
+        self.last_call_profile: ModelCallProfile | None = None
+        self.descriptor = GatewayDescriptor(
+            provider=ModelProviderId.DEEPSEEK,
+            display_name="DeepSeek",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.EXTERNAL,
+            model=model,
+            base_url=DEEPSEEK_RESPONSES_URL,
+        )
+
+    def complete(
+        self,
+        schema: type[ResponseModelT],
+        *,
+        system: str,
+        user: str,
+        reasoning_effort: Literal["none", "low"] = "low",
+    ) -> ResponseModelT:
+        # "none" is a per-call safety override. Otherwise the tested provider
+        # configuration is authoritative, including high/max.
+        selected_effort = (
+            "none" if reasoning_effort == "none" else self._reasoning_effort
+        )
+        correlation_id = f"gateway-{secrets.token_hex(12)}"
+        started = time.monotonic()
+        request = DeepSeekResponsesRequest(
+            correlation_id=correlation_id,
+            model=cast(
+                'Literal["deepseek-v4-flash", "deepseek-v4-pro"]', self._model
+            ),
+            system=system,
+            user=user,
+            response_json_schema=schema.model_json_schema(),
+            reasoning_effort=cast(
+                'Literal["none", "low", "high", "max"]', selected_effort
+            ),
+            timeout_seconds=_HOSTED_REQUEST_TIMEOUT_SECONDS,
+        )
+        self.last_call_profile = None
+        try:
+            response = self._transport.send(request)
+        except ModelGatewayError:
+            self.last_call_profile = _external_model_call_profile(
+                provider=ModelProviderId.DEEPSEEK,
+                model=self._model,
+                system=system,
+                user=user,
+                response_json_schema=request.response_json_schema,
+                max_output_tokens=request.max_output_tokens,
+                reasoning_effort=cast(
+                    'Literal["none", "low", "high", "max"]', selected_effort
+                ),
+                wall_ms=max(0, int((time.monotonic() - started) * 1000)),
+                response_chars=0,
+            )
+            raise
+        except Exception:
+            wall_ms = max(0, int((time.monotonic() - started) * 1000))
+            self.last_call_profile = _external_model_call_profile(
+                provider=ModelProviderId.DEEPSEEK,
+                model=self._model,
+                system=system,
+                user=user,
+                response_json_schema=request.response_json_schema,
+                max_output_tokens=request.max_output_tokens,
+                reasoning_effort=cast(
+                    'Literal["none", "low", "high", "max"]', selected_effort
+                ),
+                wall_ms=wall_ms,
+                response_chars=0,
+            )
+            details = GatewayFailureDetails(
+                correlation_id=correlation_id,
+                model=self._model,
+                category=GatewayErrorCategory.UPSTREAM,
+                gateway_error_type="transport_exception",
+                gateway_error_code="transport_failed",
+                provider=ModelProviderId.DEEPSEEK.value,
+                duration_ms=wall_ms,
+                retryable=False,
+            )
+            _log_gateway_failure(details)
+            raise ModelGatewayTransportError(
+                "DeepSeek request failed", details=details
+            ) from None
+        wall_ms = max(0, int((time.monotonic() - started) * 1000))
+        self.last_call_profile = _external_model_call_profile(
+            provider=ModelProviderId.DEEPSEEK,
+            model=self._model,
+            system=system,
+            user=user,
+            response_json_schema=request.response_json_schema,
+            max_output_tokens=request.max_output_tokens,
+            reasoning_effort=cast(
+                'Literal["none", "low", "high", "max"]', selected_effort
+            ),
+            wall_ms=wall_ms,
+            response_chars=len(response),
+        )
+        try:
+            return schema.model_validate(_deepseek_structured_json(response))
+        except (json.JSONDecodeError, TypeError, ValidationError):
+            raise ModelGatewayInvalidResponse(
+                "DeepSeek returned an invalid structured response"
+            ) from None
+
+
 class HostedGatewayRuntimeConfig(ContractModel):
     """Non-secret hosted configuration derived from environment variables."""
 
@@ -957,15 +1402,20 @@ class OllamaModelGateway:
         model: str = "qwen3:8b",
         endpoint: str = "http://127.0.0.1:11434",
         reasoner: Reasoner | None = None,
+        context_tokens: int | None = None,
+        timeout_seconds: int = 180,
     ) -> None:
         selected_model = model.strip()
         if _OLLAMA_MODEL.fullmatch(selected_model) is None:
             raise ValueError("Ollama model name is invalid")
+        if timeout_seconds <= 0:
+            raise ValueError("Ollama timeout must be positive")
         selected_reasoner = reasoner or OllamaReasoner(
             endpoint=endpoint,
             model=selected_model,
-            timeout=180,
+            timeout=timeout_seconds,
             max_tokens=4096,
+            context_tokens=context_tokens,
         )
         self.descriptor = GatewayDescriptor(
             provider=ModelProviderId.OLLAMA,
@@ -994,9 +1444,16 @@ class OllamaModelGateway:
             if isinstance(profile, OllamaCallProfile):
                 self.last_call_profile = ModelCallProfile(
                     provider=ModelProviderId.OLLAMA,
+                    reasoning_effort=(
+                        "low" if profile.thinking_enabled else "none"
+                    ),
                     **profile.model_dump(mode="python", exclude={"schema_version"}),
                 )
             return result
+        except ReasonerTimeoutError as exc:
+            raise ModelGatewayTimeoutError(
+                "local model processing deadline exceeded"
+            ) from exc
         except ReasonerTransportError as exc:
             raise ModelGatewayTransportError("local model request failed") from exc
         except ReasonerInvalidResponseError as exc:
@@ -1014,7 +1471,12 @@ def model_gateway_for(
     openai_api_key: str | None = None,
     openai_endpoint: str | None = None,
     openai_transport: OpenAICompatibleGatewayTransport | None = None,
+    deepseek_api_key: str | None = None,
+    deepseek_reasoning_effort: str = "low",
+    deepseek_transport: DeepSeekResponsesTransport | None = None,
     ollama_endpoint: str = "http://127.0.0.1:11434",
+    ollama_context_tokens: int | None = None,
+    ollama_timeout_seconds: int | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> ModelGateway:
     """Create one explicit provider adapter without implicit fallback."""
@@ -1067,8 +1529,42 @@ def model_gateway_for(
                 base_url=endpoint,
             )
         )
-    return OllamaModelGateway(
-        model=model or "qwen3:8b",
-        endpoint=ollama_endpoint,
-        reasoner=reasoner,
-    )
+    if selected is ModelProviderId.DEEPSEEK:
+        selected_model = model or DEEPSEEK_MODEL_IDS[0]
+        if selected_model not in DEEPSEEK_MODEL_IDS:
+            raise ValueError("DeepSeek model is invalid")
+        if deepseek_reasoning_effort not in DEEPSEEK_REASONING_EFFORTS:
+            raise ValueError("DeepSeek reasoning effort is invalid")
+        credential = (
+            deepseek_api_key.strip() if deepseek_api_key is not None else ""
+        )
+        if credential:
+            selected_transport = deepseek_transport or DeepSeekResponsesHTTPTransport(
+                credential
+            )
+            return DeepSeekModelGateway(
+                model=selected_model,
+                reasoning_effort=deepseek_reasoning_effort,
+                transport=selected_transport,
+            )
+        return UnconfiguredModelGateway(
+            GatewayDescriptor(
+                provider=selected,
+                display_name="DeepSeek",
+                configuration_state=GatewayConfigurationState.NOT_CONFIGURED,
+                transport_scope=GatewayTransportScope.EXTERNAL,
+                model=selected_model,
+                base_url=DEEPSEEK_RESPONSES_URL,
+            )
+        )
+    if selected is ModelProviderId.OLLAMA:
+        return OllamaModelGateway(
+            model=model or "qwen3:8b",
+            endpoint=ollama_endpoint,
+            reasoner=reasoner,
+            context_tokens=ollama_context_tokens,
+            timeout_seconds=(
+                ollama_timeout_seconds if ollama_timeout_seconds is not None else 180
+            ),
+        )
+    raise AssertionError(f"provider factory is incomplete for {selected.value}")

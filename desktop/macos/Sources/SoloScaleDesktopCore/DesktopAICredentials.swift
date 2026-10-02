@@ -40,6 +40,27 @@ public enum DesktopOpenAIKeychain {
     }
 }
 
+public enum DesktopDeepSeekKeychain {
+    public static let service = "local.soloscale.desktop.ai.deepseek"
+    public static let account = "default"
+
+    public static func save(_ apiKey: String) throws {
+        try DesktopSecretKeychain.save(
+            try desktopAIKeyPayload(apiKey),
+            service: service,
+            account: account
+        )
+    }
+
+    public static func delete() throws {
+        try DesktopSecretKeychain.delete(service: service, account: account)
+    }
+
+    public static func read() throws -> Data? {
+        try DesktopSecretKeychain.read(service: service, account: account)
+    }
+}
+
 public enum DesktopGitHubKeychain {
     public static let service = "local.soloscale.desktop.github"
     public static let account = "default"
@@ -185,7 +206,8 @@ public func desktopCredentialFrame(_ payload: Data?) throws -> Data {
 public func desktopCredentialEnvelopeFrame(
     openAIKey: Data?,
     githubAccessToken: Data?,
-    heygenAPIKey: Data?
+    heygenAPIKey: Data?,
+    deepseekAPIKey: Data?
 ) throws -> Data {
     var envelope: [String: Any] = ["schema_version": "1.0"]
     if let openAIKey {
@@ -205,6 +227,12 @@ public func desktopCredentialEnvelopeFrame(
             throw DesktopAICredentialError.invalidKey
         }
         envelope["heygen_api_key"] = value
+    }
+    if let deepseekAPIKey {
+        guard let value = String(data: deepseekAPIKey, encoding: .utf8) else {
+            throw DesktopAICredentialError.invalidKey
+        }
+        envelope["deepseek_api_key"] = value
     }
     let body = try JSONSerialization.data(
         withJSONObject: envelope,

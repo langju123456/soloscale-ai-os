@@ -23,11 +23,19 @@ private enum StartupDestination {
 
     var path: String {
         switch self {
-        case .home: "/"
-        case .workProjectConnected, .workChatGPTSelected, .workGitHubDisconnected: "/work"
-        case .workGitHubConnected: "/work/github"
-        case .aiSettings: "/settings/ai/openai"
-        case .heyGenSettings: "/settings/media/heygen"
+        case .home: return "/"
+        case .workProjectConnected, .workChatGPTSelected, .workGitHubDisconnected:
+            return "/work"
+        case .workGitHubConnected: return "/work/github"
+        case .aiSettings(let returnPath):
+            guard let returnPath,
+                  let components = URLComponents(string: returnPath),
+                  ["/settings/ai/openai", "/settings/ai/deepseek"].contains(
+                    components.path
+                  )
+            else { return "/settings/ai/openai" }
+            return components.path
+        case .heyGenSettings: return "/settings/media/heygen"
         }
     }
 
@@ -55,6 +63,28 @@ private let localePreferenceKey = "SoloScaleUILocale"
 private let releasesURL = URL(
     string: "https://github.com/langju123456/soloscale-ai-os/releases/latest"
 )!
+
+private func bundleIdentityValue(_ key: String) -> String {
+    guard
+        let raw = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+        !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else { return "unknown" }
+    return raw
+}
+
+private func desktopBuildEnvironment() -> [String: String] {
+    [
+        "SOLOSCALE_DESKTOP_APP_VERSION": bundleIdentityValue("CFBundleShortVersionString"),
+        "SOLOSCALE_DESKTOP_BUILD_NUMBER": bundleIdentityValue("CFBundleVersion"),
+        "SOLOSCALE_DESKTOP_BUILD_KIND": bundleIdentityValue("SoloScaleBuildKind"),
+        "SOLOSCALE_DESKTOP_BUNDLE_ID": Bundle.main.bundleIdentifier ?? "unknown",
+        "SOLOSCALE_DESKTOP_DISPLAY_NAME": bundleIdentityValue("CFBundleDisplayName"),
+        "SOLOSCALE_DESKTOP_GIT_BRANCH": bundleIdentityValue("SoloScaleGitBranch"),
+        "SOLOSCALE_DESKTOP_GIT_COMMIT": bundleIdentityValue("SoloScaleGitCommit"),
+        "SOLOSCALE_DESKTOP_GIT_DIRTY": bundleIdentityValue("SoloScaleGitDirty"),
+        "SOLOSCALE_DESKTOP_BUNDLE_PATH": Bundle.main.bundlePath,
+    ]
+}
 
 private final class BootstrapRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(
@@ -111,6 +141,7 @@ private final class BackendController: NSObject, ObservableObject {
                 "SOLOSCALE_DESKTOP_SESSION_TOKEN": token,
                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             ]
+            desktopEnvironment.merge(desktopBuildEnvironment()) { _, new in new }
             if let selectedExport = pendingChatGPTExport {
                 desktopEnvironment["SOLOSCALE_PENDING_CHATGPT_EXPORT"] = selectedExport.path
             }
@@ -135,7 +166,8 @@ private final class BackendController: NSObject, ObservableObject {
                     desktopCredentialEnvelopeFrame(
                         openAIKey: try DesktopOpenAIKeychain.read(),
                         githubAccessToken: try DesktopGitHubKeychain.read(),
-                        heygenAPIKey: try DesktopHeyGenKeychain.read()
+                        heygenAPIKey: try DesktopHeyGenKeychain.read(),
+                        deepseekAPIKey: try DesktopDeepSeekKeychain.read()
                     )
                 )
                 credentialWriter.closeFile()
@@ -162,6 +194,14 @@ private final class BackendController: NSObject, ObservableObject {
     }
     func deleteOpenAIKey(returnPath: String?) throws {
         try DesktopOpenAIKeychain.delete()
+        restart(destination: .aiSettings(whitelistedAISettingsReturnPath(returnPath)))
+    }
+    func saveDeepSeekKey(_ apiKey: String, returnPath: String?) throws {
+        try DesktopDeepSeekKeychain.save(apiKey)
+        restart(destination: .aiSettings(whitelistedAISettingsReturnPath(returnPath)))
+    }
+    func deleteDeepSeekKey(returnPath: String?) throws {
+        try DesktopDeepSeekKeychain.delete()
         restart(destination: .aiSettings(whitelistedAISettingsReturnPath(returnPath)))
     }
     func saveHeyGenKey(_ apiKey: String, returnPath: String?) throws {
@@ -317,7 +357,11 @@ private final class BackendController: NSObject, ObservableObject {
     }
 
     private func applicationSupportDirectory() throws -> URL {
-        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("SoloScale AI OS", isDirectory: true)
+        let buildKind = bundleIdentityValue("SoloScaleBuildKind")
+        let supportName = buildKind == "production"
+            ? "SoloScale AI OS"
+            : bundleIdentityValue("CFBundleDisplayName")
+        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent(supportName, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
@@ -531,7 +575,9 @@ private final class BackendController: NSObject, ObservableObject {
               components.host == nil,
               components.user == nil,
               components.password == nil,
-              components.path == "/settings/ai/openai"
+              ["/settings/ai/openai", "/settings/ai/deepseek"].contains(
+                components.path
+              )
         else { return nil }
         return returnPath
     }
@@ -624,6 +670,11 @@ private struct LocalWebView: NSViewRepresentable {
                     try backend.saveOpenAIKey(apiKey, returnPath: returnPath)
                 case "deleteOpenAIKey":
                     try backend.deleteOpenAIKey(returnPath: returnPath)
+                case "saveDeepSeekKey":
+                    guard let apiKey = body["apiKey"] as? String else { return }
+                    try backend.saveDeepSeekKey(apiKey, returnPath: returnPath)
+                case "deleteDeepSeekKey":
+                    try backend.deleteDeepSeekKey(returnPath: returnPath)
                 case "saveHeyGenKey":
                     guard let apiKey = body["apiKey"] as? String else { return }
                     try backend.saveHeyGenKey(apiKey, returnPath: returnPath)

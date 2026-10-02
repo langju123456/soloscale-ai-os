@@ -1,6 +1,9 @@
 # SoloScale AI OS — Project Specification
 
 > This is the primary product and engineering context for humans and coding agents.
+> The specification includes future ambitions. Current delivery scope and frozen
+> follow-ups are in [TASK.md](TASK.md); verified release boundaries are in
+> [closeout-0.4.2.md](docs/engineering/closeout-0.4.2.md).
 
 ## 1. Identity
 

@@ -20,6 +20,24 @@ Build the app through the normal command:
 ./scripts/build_macos_app.sh
 ```
 
+Both the backend sidecar and the App build fail unless the source worktree is clean
+and fully committed. The backend emits `source-provenance.json` with its full source
+commit and clean marker. The App build accepts the sidecar only when that receipt
+matches the App source commit, and the validation launcher independently verifies the
+embedded receipt before launch. Missing, abbreviated, dirty, mismatched, malformed,
+or symlinked provenance is rejected.
+
+Launch a developer validation bundle through the deterministic process gate:
+
+```bash
+./scripts/launch_macos_validation_app.py \
+  "desktop/macos/dist/SoloScale AI OS Dev.app"
+```
+
+Do not use `open -n` for validation. The launcher first terminates only verified
+SoloScale Desktop app/backend processes, confirms that none remain, opens the exact
+bundle path once, and records its embedded provenance.
+
 The build script loads the same config, overrides ambient `DEVELOPER_DIR` and
 `SDKROOT`, then resolves Swift and the current macOS SDK through Xcode's `xcrun`. The
 preflight fails before compilation if Xcode drifts or any tool resolves outside that

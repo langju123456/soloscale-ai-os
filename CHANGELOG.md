@@ -2,7 +2,26 @@
 
 All notable changes will be documented here.
 
-## [Unreleased]
+## [0.4.2] — 2026-10-02
+
+### Fixed
+
+- Chinese project editing now requests a change of emphasis grounded in source
+  mechanisms and validation, rather than verb substitutions.
+- Unmeasured Chinese outcome claims such as improved accuracy are rejected and
+  fall back to the source slot. This bounded lexical gate still requires human
+  semantic review.
+- Python package, desktop metadata, and build defaults agree on 0.4.2 / build 9.
+- Desktop identity tests cover detached PR checkouts: an absent branch is `unknown`,
+  while the full commit and clean/dirty state must still match the worktree.
+
+### Changed
+
+- Replaced stale sprint gates with the actual closeout scope, acceptance evidence,
+  and explicit deferred work.
+- Desktop instructions reflect the existing pinned full-Xcode toolchain.
+
+## [Unreleased] — historical foundation
 
 ### Added
 

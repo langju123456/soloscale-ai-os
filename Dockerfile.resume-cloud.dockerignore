@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!.agents/
+!.agents/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/migrate_resume_cloud.py

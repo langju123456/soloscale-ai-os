@@ -61,9 +61,8 @@ python -m build
   `DEVELOPER_DIR`, or `SDKROOT` state.
 - If preflight reports compiler or SDK drift, stop and report it. Do not search for a
   random alternate Swift toolchain or silently change the pinned versions.
-- The current pinned Command Line Tools fallback is provisional because full Xcode is not
-  installed. After full Xcode is installed, switch the one config to `full-xcode`; never
-  silently fall back to Command Line Tools afterward.
+- The canonical config now uses full Xcode. Keep that pinned compiler/SDK pair;
+  do not silently fall back to Command Line Tools.
 
 ## Definition of done
 

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id": "noanswer", "question": "LIVE_UNKNOWN_VERIFY_90210 was it verified?", "documents": [], "expect": {"empty_claims_refs": true}},
+    {"id": "conflict", "question": "LIVE_MIGRATION_417 status migration", "documents": [
+      {"id": "live-conflict-a", "external_id": "live-conflict-a", "locator": "synthetic://a", "source_kind": "chatgpt_export", "title": "Synthetic completion", "chunks": [{"id": "live-conflict-complete", "role": "assistant", "text": "LIVE_MIGRATION_417 migration completed after verification."}]},
+      {"id": "live-conflict-b", "external_id": "live-conflict-b", "locator": "synthetic://b", "source_kind": "chatgpt_export", "title": "Synthetic incident", "chunks": [{"id": "live-conflict-incomplete", "role": "assistant", "text": "LIVE_MIGRATION_417 migration remains incomplete after incident review."}]}
+    ], "expect": {"context_ids": ["live-conflict-complete", "live-conflict-incomplete"], "ref_ids": ["live-conflict-complete", "live-conflict-incomplete"], "requires_uncertainty": true}},
+    {"id": "long_utf8", "question": "LIVE_UTF8_CRITICAL_773", "excerpt_byte_budget": 180, "context_byte_budget": 700, "documents": [
+      {"id": "live-utf8", "external_id": "live-utf8", "locator": "synthetic://utf8", "source_kind": "chatgpt_export", "title": "Synthetic UTF8", "chunks": [{"id": "live-utf8-critical", "role": "assistant", "text": "填", "text_repeat": 1200, "text_suffix": " LIVE_UTF8_CRITICAL_773 使用持久队列和幂等键。"}]}
+    ], "expect": {"context_bytes_at_most": 700, "critical_literal": "LIVE_UTF8_CRITICAL_773 使用持久队列和幂等键。"}}
+  ]
+}

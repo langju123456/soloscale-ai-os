@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from soloscale.knowledge_models import ContentRole, RetrievalHit, SourceKind
 from soloscale.knowledge_store import KnowledgeStore
 
-PROMPT_VERSION = "evidence-agent-v2"
+PROMPT_VERSION = "evidence-agent-v4"
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _CONTEXT_EXTERNAL_ID_BYTES = 96
@@ -71,6 +71,10 @@ class ReasonerTransportError(ReasonerError):
     """Raised when the configured local reasoner cannot be reached safely."""
 
 
+class ReasonerTimeoutError(ReasonerTransportError):
+    """Raised when the configured local reasoner exceeds its processing deadline."""
+
+
 class ReasonerInvalidResponseError(ReasonerError):
     """Raised when a reasoner response does not satisfy its requested contract."""
 
@@ -81,6 +85,10 @@ class EvidenceAgentContractError(EvidenceAgentError):
 
 class EvidenceAgentToolError(EvidenceAgentError):
     """Raised when the one allowed retrieval tool fails."""
+
+
+class EvidenceAgentTimeoutError(EvidenceAgentToolError):
+    """Raised when a bounded reasoner or retrieval operation times out."""
 
 
 class EvidenceAgentArtifactError(EvidenceAgentError):
@@ -100,6 +108,7 @@ class OllamaCallProfile(_StrictModel):
     user_chars: int = Field(ge=0)
     schema_chars: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
+    requested_context_tokens: int | None = Field(default=None, ge=1)
     thinking_enabled: Literal[False] = False
     prompt_eval_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
@@ -251,12 +260,22 @@ class OllamaReasoner:
         model: str = "qwen3:8b",
         timeout: float = 120.0,
         max_tokens: int = 2048,
+        context_tokens: int | None = None,
         opener: Callable[..., Any] | None = None,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        if (
+            context_tokens is not None
+            and (
+                not isinstance(context_tokens, int)
+                or isinstance(context_tokens, bool)
+                or context_tokens <= 0
+            )
+        ):
+            raise ValueError("context_tokens must be a positive integer")
         if not endpoint.strip():
             raise ValueError("endpoint must not be empty")
         if not model.strip():
@@ -266,6 +285,7 @@ class OllamaReasoner:
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.context_tokens = context_tokens
         self.last_call_profile: OllamaCallProfile | None = None
         if opener is None:
             direct_opener = urllib.request.build_opener(
@@ -285,6 +305,10 @@ class OllamaReasoner:
     ) -> ResponseModelT:
         self.last_call_profile = None
         response_schema = schema.model_json_schema()
+        options: dict[str, int] = {
+            "temperature": 0,
+            "num_predict": self.max_tokens,
+        }
         payload = {
             "model": self.model,
             "messages": [
@@ -294,11 +318,10 @@ class OllamaReasoner:
             "stream": False,
             "think": False,
             "format": response_schema,
-            "options": {
-                "temperature": 0,
-                "num_predict": self.max_tokens,
-            },
+            "options": options,
         }
+        if self.context_tokens is not None:
+            options["num_ctx"] = self.context_tokens
         request = urllib.request.Request(
             f"{self.endpoint}/api/chat",
             data=_canonical_json_bytes(payload),
@@ -309,7 +332,15 @@ class OllamaReasoner:
         try:
             with self._opener(request, timeout=self.timeout) as response:
                 raw = response.read(_MAX_REASONER_RESPONSE_BYTES + 1)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        except TimeoutError:
+            raise ReasonerTimeoutError("local reasoner processing deadline exceeded") from None
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise ReasonerTimeoutError(
+                    "local reasoner processing deadline exceeded"
+                ) from None
+            raise ReasonerTransportError("local reasoner request failed") from None
+        except (urllib.error.HTTPError, OSError):
             raise ReasonerTransportError("local reasoner request failed") from None
         except Exception:
             raise ReasonerTransportError("local reasoner request failed") from None
@@ -340,6 +371,7 @@ class OllamaReasoner:
                 user_chars=len(user),
                 schema_chars=len(_canonical_json_bytes(response_schema)),
                 max_output_tokens=self.max_tokens,
+                requested_context_tokens=self.context_tokens,
                 prompt_eval_tokens=_ollama_metric_count(
                     envelope, "prompt_eval_count"
                 ),
@@ -653,18 +685,32 @@ class BoundedEvidenceAgent:
             )
             self._write_artifact(run_dir, "03_retrieval_manifest.json", retrieval_manifest)
 
-            draft = self._reason(
-                GroundedDraft,
-                stage="grounded drafting",
-                system=_grounded_draft_system(),
-                user=_json_text(
-                    {
-                        "question": normalized_question,
-                        "allowed_evidence_chunk_ids": context_ids,
-                        "evidence_records": json.loads(context_text),
-                    }
-                ),
-            )
+            if context_ids:
+                draft = self._reason(
+                    GroundedDraft,
+                    stage="grounded drafting",
+                    system=_grounded_draft_system(),
+                    user=_json_text(
+                        {
+                            "question": normalized_question,
+                            "allowed_evidence_chunk_ids": context_ids,
+                            "evidence_records": json.loads(context_text),
+                        }
+                    ),
+                )
+            else:
+                draft = GroundedDraft(
+                    claims=[],
+                    unsupported=[
+                        (
+                            "Information is insufficient: no retrieved evidence fit the "
+                            "grounded-draft context."
+                        )
+                    ],
+                    open_questions=[],
+                    suggested_case_title=None,
+                    suggested_outputs=[],
+                )
             self._validate_draft(draft, allowed_chunk_ids=set(context_ids))
             cited_ids = _ordered_cited_ids(draft.claims)
             self._validate_current_citations(cited_ids, context_by_id)
@@ -723,6 +769,8 @@ class BoundedEvidenceAgent:
     ) -> ResponseModelT:
         try:
             return self.reasoner.complete(schema, system=system, user=user)
+        except ReasonerTimeoutError:
+            raise EvidenceAgentTimeoutError(f"reasoner timed out during {stage}") from None
         except ReasonerTransportError:
             raise EvidenceAgentToolError(f"reasoner transport failed during {stage}") from None
         except ReasonerInvalidResponseError:
@@ -745,6 +793,8 @@ class BoundedEvidenceAgent:
     ) -> list[RetrievalHit]:
         try:
             return list(self.store.search(query, limit=limit, source_kinds=source_kinds))
+        except TimeoutError:
+            raise EvidenceAgentTimeoutError("knowledge search timed out") from None
         except Exception:
             raise EvidenceAgentToolError("knowledge search failed") from None
 
@@ -762,6 +812,8 @@ class BoundedEvidenceAgent:
                 known_by_id[primary.chunk_id] = primary
             try:
                 neighbors = self.store.get_neighbors([primary.chunk_id], radius=1)
+            except TimeoutError:
+                raise EvidenceAgentTimeoutError("knowledge neighbor expansion timed out") from None
             except Exception:
                 raise EvidenceAgentToolError("knowledge neighbor expansion failed") from None
             for hit in neighbors:
@@ -794,6 +846,8 @@ class BoundedEvidenceAgent:
             return
         try:
             current = self.store.get_chunks(cited_ids)
+        except TimeoutError:
+            raise EvidenceAgentTimeoutError("citation lineage verification timed out") from None
         except Exception:
             raise EvidenceAgentToolError("citation lineage verification failed") from None
         current_by_id = {hit.chunk_id: hit for hit in current}
@@ -1024,7 +1078,14 @@ def _grounded_draft_system() -> str:
         "or more exact IDs from allowed_evidence_chunk_ids. Put every evidence-backed resume "
         "bullet in claims, never in suggested_outputs. suggested_outputs may contain only short "
         "artifact labels and must not contain facts, evidence IDs, citations, or bullet text. Put "
-        "anything not supported by those records in unsupported or open_questions. This is only "
+        "anything not supported by those records in unsupported or open_questions; use empty "
+        "arrays when there is genuinely nothing unsupported or open, and never use filler such "
+        "as 'No unsupported information', 'none', or a restatement of the question. For disputed "
+        "facts, write attributed claims such as 'source X reports ...' rather than asserting both "
+        "world states. When records are mutually exclusive, cite each relevant source and state in "
+        "unsupported or open_questions that the sources conflict and the final state cannot be "
+        "established without authoritative clarification; never silently choose a winner. This is "
+        "only "
         "a candidate for human "
         "confirmation; do not claim to update Casebook, BuildLog, GitHub, or any external system."
     )

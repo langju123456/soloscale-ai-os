@@ -11,6 +11,8 @@ from soloscale.desktop_credentials import (
     _frame_for_tests,
     configure_desktop_credentials_from_stdin,
     configure_openai_credential_from_stdin,
+    deepseek_api_key,
+    deepseek_api_key_is_configured,
     github_access_token,
     github_access_token_is_configured,
     heygen_api_key,
@@ -36,6 +38,7 @@ def test_desktop_credential_frame_supports_empty_and_process_memory_values() -> 
             "openai_api_key": "synthetic-openai-key",
             "github_access_token": "synthetic-github-token",
             "heygen_api_key": "synthetic-heygen-key",
+            "deepseek_api_key": "synthetic-deepseek-key",
         },
         sort_keys=True,
     ).encode()
@@ -45,6 +48,23 @@ def test_desktop_credential_frame_supports_empty_and_process_memory_values() -> 
     assert github_access_token() == "synthetic-github-token"
     assert heygen_api_key_is_configured() is True
     assert heygen_api_key() == "synthetic-heygen-key"
+    assert deepseek_api_key_is_configured() is True
+    assert deepseek_api_key() == "synthetic-deepseek-key"
+    _clear_for_tests()
+
+    envelope_without_deepseek = json.dumps(
+        {
+            "schema_version": "1.0",
+            "openai_api_key": "synthetic-openai-key",
+        },
+        sort_keys=True,
+    ).encode()
+    configure_desktop_credentials_from_stdin(
+        _frame_for_tests(envelope_without_deepseek)
+    )
+    assert openai_api_key_is_configured() is True
+    assert deepseek_api_key_is_configured() is False
+    assert deepseek_api_key() is None
     _clear_for_tests()
 
 

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/resume-intelligence-public-sync]
   pull_request:
 
 permissions:
@@ -20,6 +20,19 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: resume_cloud_test
+          POSTGRES_USER: resume_cloud
+          POSTGRES_PASSWORD: resume_cloud_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U resume_cloud -d resume_cloud_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      CLOUD_TEST_DATABASE_URL: postgresql://resume_cloud:resume_cloud_test@localhost:5432/resume_cloud_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,8 +40,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -e '.[dev]'
+      - run: pip install -e '.[dev,api,cloud]'
+      - run: RESUME_CLOUD_DATABASE_URL="$CLOUD_TEST_DATABASE_URL" python scripts/migrate_resume_cloud.py
       - run: ruff check .
       - run: mypy src tests
       - run: pytest -q
       - run: python -m build
+      - name: Build and smoke-test Linux AMD64 container
+        if: matrix.python-version == '3.12'
+        run: |
+          docker build --platform linux/amd64 --file Dockerfile.resume-cloud --tag soloscale-resume-cloud:ci .
+          test "$(docker image inspect soloscale-resume-cloud:ci --format '{{.Architecture}}')" = amd64
+          docker run --rm --no-healthcheck --entrypoint python soloscale-resume-cloud:ci -c 'import os; import soloscale.resume_cloud_api; import soloscale.resume_cloud_worker; assert os.getuid() == 10001; print("AMD64 cloud container imports passed as non-root user")'
+
+  deploy_resume_cloud:
+    needs: test
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/codex/resume-intelligence-public-sync' &&
+      vars.RESUME_CLOUD_DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/resume-cloud-deploy.yml

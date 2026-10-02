@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -76,6 +76,8 @@ from soloscale.creator_workspace import creator_history_page, creator_overview_p
 from soloscale.desktop_credentials import (
     DesktopCredentialError,
     configure_desktop_credentials_from_stdin,
+    deepseek_api_key,
+    deepseek_api_key_is_configured,
     github_access_token,
     github_access_token_is_configured,
     heygen_api_key_is_configured,
@@ -102,7 +104,7 @@ from soloscale.github_connect import (
     GitHubReadOnlyClient,
 )
 from soloscale.integration_status import connected_service_statuses
-from soloscale.knowledge_models import RetrievalHit
+from soloscale.knowledge_models import RetrievalHit, SourceKind
 from soloscale.knowledge_store import (
     KnowledgeStore,
     KnowledgeStoreError,
@@ -132,6 +134,7 @@ from soloscale.learning_traceability import (
     run_learning_traceability,
     save_learning_response,
 )
+from soloscale.mac_discovery import load_discovery_catalog
 from soloscale.media_cost import (
     BudgetPolicy,
     MediaCostError,
@@ -150,13 +153,20 @@ from soloscale.media_quality import (
     save_media_quality_review,
 )
 from soloscale.model_gateway import (
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL_IDS,
+    DEEPSEEK_MODELS_URL,
+    DEEPSEEK_REASONING_EFFORTS,
+    MODEL_PROVIDER_CATALOG,
     GatewayConfigurationState,
     ModelGateway,
     ModelGatewayInvalidResponse,
     ModelGatewayNotConfigured,
+    ModelGatewayTimeoutError,
     ModelGatewayTransportError,
     ModelProviderId,
     model_gateway_for,
+    model_provider_catalog_entry,
 )
 from soloscale.platform_accounts import (
     PROVIDERS,
@@ -183,6 +193,7 @@ from soloscale.reference_video import (
     ReferenceVideoError,
     analyze_reference_video,
 )
+from soloscale.resume_claim_truth import build_claim_truth_result
 from soloscale.resume_docx import (
     ResumeTemplateError,
     TailoredDocx,
@@ -208,17 +219,37 @@ from soloscale.resume_gateway_boundary import (
     normalize_text_resume_to_docx,
     record_resume_funnel_event,
 )
+from soloscale.resume_generation import (
+    build_coverage_report,
+    build_generation_contract,
+    build_generation_preflight,
+    build_role_strategy,
+    render_application_resume,
+    select_allowed_claims,
+)
 from soloscale.resume_models import (
+    ApplicationClaim,
+    ApplicationResumeDraft,
     CandidateProfile,
+    ClaimTruthResult,
+    ContributionMode,
+    CoverageReport,
+    GeneratedResumeBullet,
+    GenerationPreflight,
     InterviewDefenseRecord,
     ResumeClaimProvenance,
     ResumeClaimVerificationStatus,
+    ResumeEvidenceCoverageMap,
     ResumeExpertReviewResult,
+    ResumeGenerationContract,
     ResumeHiringSignalReceipt,
     ResumeMode,
     ResumeProvenanceReceipt,
+    ResumeRoleStrategy,
     build_resume_atomic_facts,
+    validate_resume_profile_entry_count,
 )
+from soloscale.resume_retrieval import build_evidence_coverage_map
 from soloscale.resume_template_intake import (
     ResumeTemplateReceipt,
     detect_resume_language,
@@ -316,6 +347,43 @@ _DESKTOP_NONCE_RE = re.compile(r"[a-f0-9]{64}")
 _DESKTOP_BOOTSTRAP_PATH = "/__desktop/bootstrap"
 _DESKTOP_NONCE_HEADER = "X-SoloScale-Bootstrap-Nonce"
 _DESKTOP_PROOF_HEADER = "X-SoloScale-Bootstrap-Proof"
+
+
+@dataclass(frozen=True)
+class DesktopBuildIdentity:
+    app_version: str = "unknown"
+    build_number: str = "unknown"
+    build_kind: str = "unknown"
+    bundle_id: str = "unknown"
+    display_name: str = "unknown"
+    git_branch: str = "unknown"
+    git_commit: str = "unknown"
+    git_dirty: str = "unknown"
+    bundle_path: str = "unknown"
+
+
+def _desktop_build_identity(
+    environment: Mapping[str, str] | None = None,
+) -> DesktopBuildIdentity:
+    selected = os.environ if environment is None else environment
+
+    def value(key: str, *, maximum: int = 512) -> str:
+        raw = selected.get(key, "").strip()
+        if not raw or len(raw) > maximum or any(char in raw for char in "\x00\r\n"):
+            return "unknown"
+        return raw
+
+    return DesktopBuildIdentity(
+        app_version=value("SOLOSCALE_DESKTOP_APP_VERSION"),
+        build_number=value("SOLOSCALE_DESKTOP_BUILD_NUMBER"),
+        build_kind=value("SOLOSCALE_DESKTOP_BUILD_KIND"),
+        bundle_id=value("SOLOSCALE_DESKTOP_BUNDLE_ID"),
+        display_name=value("SOLOSCALE_DESKTOP_DISPLAY_NAME"),
+        git_branch=value("SOLOSCALE_DESKTOP_GIT_BRANCH"),
+        git_commit=value("SOLOSCALE_DESKTOP_GIT_COMMIT"),
+        git_dirty=value("SOLOSCALE_DESKTOP_GIT_DIRTY"),
+        bundle_path=value("SOLOSCALE_DESKTOP_BUNDLE_PATH", maximum=2048),
+    )
 
 
 @dataclass
@@ -606,11 +674,24 @@ class ResumeJobManager:
 
 
 @dataclass(frozen=True)
+class AIProviderValidation:
+    provider: ModelProviderId
+    configuration_fingerprint: str
+    status: Literal["ready", "failed"]
+    detail: str
+    checked_at: str
+
+
+@dataclass(frozen=True)
 class AIProviderPreference:
     default_provider: ModelProviderId = ModelProviderId.SOLOSCALE_HOSTED
     ollama_model: str = "qwen3:8b"
     ollama_url: str = _OLLAMA_DEFAULT_URL
     openai_model: str = _OPENAI_DEFAULT_MODEL
+    deepseek_model: str = DEEPSEEK_MODEL_IDS[0]
+    deepseek_reasoning_effort: str = "low"
+    validations: tuple[AIProviderValidation, ...] = ()
+    legacy_deepseek_migrated: bool = False
 
     @property
     def provider(self) -> ModelProviderId:
@@ -624,6 +705,8 @@ class AIProviderPreference:
             return self.ollama_model
         if self.default_provider is ModelProviderId.OPENAI_COMPATIBLE:
             return self.openai_model
+        if self.default_provider is ModelProviderId.DEEPSEEK:
+            return self.deepseek_model
         return "zai/glm-5.2"
 
 
@@ -639,38 +722,245 @@ class OllamaReadiness:
         return self.installed and self.reachable and self.model_available
 
 
+ResumeAIReadiness = Literal[
+    "READY", "CONFIGURED_NOT_TESTED", "NOT_CONFIGURED", "UNAVAILABLE"
+]
+
+
+@dataclass(frozen=True)
+class ResumeAISelection:
+    """One request-scoped Resume choice resolved from canonical provider state."""
+
+    choice_id: str
+    provider: ModelProviderId
+    model: str
+    reasoning_effort: str
+    readiness: ResumeAIReadiness
+    settings_path: str
+
+    @property
+    def ready(self) -> bool:
+        return self.readiness == "READY"
+
+
 def _ai_provider_preference_path(data_root: Path) -> Path:
     return data_root.expanduser().absolute() / "settings" / "ai-provider.json"
 
 
+def _legacy_deepseek_preference_path(data_root: Path) -> Path:
+    return data_root.expanduser().absolute() / "settings" / "deepseek-provider.json"
+
+
+def _provider_configuration_fingerprint(
+    preference: AIProviderPreference,
+    provider: ModelProviderId,
+) -> str:
+    if provider is ModelProviderId.OLLAMA:
+        values = [provider.value, preference.ollama_url, preference.ollama_model]
+    elif provider is ModelProviderId.OPENAI_COMPATIBLE:
+        values = [provider.value, _OPENAI_CHAT_COMPLETIONS_URL, preference.openai_model]
+    elif provider is ModelProviderId.DEEPSEEK:
+        values = [
+            provider.value,
+            DEEPSEEK_BASE_URL,
+            preference.deepseek_model,
+            preference.deepseek_reasoning_effort,
+        ]
+    elif provider is ModelProviderId.SOLOSCALE_HOSTED:
+        values = [provider.value, "zai/glm-5.2"]
+    else:
+        raise AssertionError(f"provider fingerprint is incomplete for {provider.value}")
+    return hashlib.sha256("\x00".join(values).encode("utf-8")).hexdigest()
+
+
+def _provider_validation(
+    preference: AIProviderPreference,
+    provider: ModelProviderId,
+) -> AIProviderValidation | None:
+    expected = _provider_configuration_fingerprint(preference, provider)
+    return next(
+        (
+            validation
+            for validation in preference.validations
+            if validation.provider is provider
+            and validation.configuration_fingerprint == expected
+        ),
+        None,
+    )
+
+
+def _parse_provider_validations(payload: object) -> tuple[AIProviderValidation, ...]:
+    if not isinstance(payload, dict):
+        return ()
+    parsed: list[AIProviderValidation] = []
+    for raw_provider, raw_validation in payload.items():
+        if not isinstance(raw_provider, str) or not isinstance(raw_validation, dict):
+            continue
+        try:
+            provider = ModelProviderId(raw_provider)
+        except ValueError:
+            continue
+        fingerprint = raw_validation.get("configuration_fingerprint")
+        status = raw_validation.get("status")
+        detail = raw_validation.get("detail", "")
+        checked_at = raw_validation.get("checked_at", "")
+        if (
+            not isinstance(fingerprint, str)
+            or re.fullmatch(r"[a-f0-9]{64}", fingerprint) is None
+            or status not in {"ready", "failed"}
+            or not isinstance(detail, str)
+            or len(detail) > 80
+            or not isinstance(checked_at, str)
+            or len(checked_at) > 40
+        ):
+            continue
+        parsed.append(
+            AIProviderValidation(
+                provider=provider,
+                configuration_fingerprint=fingerprint,
+                status=cast(Literal["ready", "failed"], status),
+                detail=detail,
+                checked_at=checked_at,
+            )
+        )
+    return tuple(parsed)
+
+
+def _legacy_deepseek_values(data_root: Path) -> tuple[str, str] | None:
+    path = _legacy_deepseek_preference_path(data_root)
+    try:
+        path.lstat()
+        if path.is_symlink() or not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    model = str(payload.get("model_id", payload.get("deepseek_model", ""))).strip()
+    if model not in DEEPSEEK_MODEL_IDS:
+        return None
+    thinking = payload.get("thinking_enabled", payload.get("deepseek_thinking", True))
+    effort = str(
+        payload.get("reasoning_effort", payload.get("deepseek_reasoning_effort", "low"))
+    ).strip().casefold()
+    if thinking is False:
+        effort = "none"
+    if effort not in DEEPSEEK_REASONING_EFFORTS:
+        return None
+    return model, effort
+
+
+def _write_ai_provider_preference(
+    data_root: Path,
+    preference: AIProviderPreference,
+) -> None:
+    path = _ai_provider_preference_path(data_root)
+    _reject_symlink_ancestry(path.parent)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    validations = {
+        validation.provider.value: {
+            "checked_at": validation.checked_at,
+            "configuration_fingerprint": validation.configuration_fingerprint,
+            "detail": validation.detail,
+            "status": validation.status,
+        }
+        for validation in preference.validations
+    }
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "default_ai_provider": preference.default_provider.value,
+        "ollama_model": preference.ollama_model,
+        "ollama_url": preference.ollama_url,
+        "openai_model": preference.openai_model,
+        "deepseek_model": preference.deepseek_model,
+        "deepseek_reasoning_effort": preference.deepseek_reasoning_effort,
+        "provider_validation": validations,
+    }
+    if preference.legacy_deepseek_migrated:
+        payload["migrations"] = {"deepseek_provider_json": "imported"}
+    _atomic_private_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
 def _load_ai_provider_preference(data_root: Path) -> AIProviderPreference:
     path = _ai_provider_preference_path(data_root)
+    payload: dict[str, object] = {}
     try:
         path.lstat()
         if path.is_symlink() or not path.is_file():
             return AIProviderPreference()
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(decoded, dict):
+            return AIProviderPreference()
+        payload = cast(dict[str, object], decoded)
         provider = ModelProviderId(
-            str(payload.get("default_ai_provider", payload.get("provider", "")))
+            str(
+                payload.get(
+                    "default_ai_provider",
+                    payload.get("provider", ModelProviderId.SOLOSCALE_HOSTED.value),
+                )
+            )
         )
         legacy_model = str(payload.get("model", "")).strip()
         ollama_model = str(payload.get("ollama_model", legacy_model or "qwen3:8b")).strip()
         openai_model = str(payload.get("openai_model", _OPENAI_DEFAULT_MODEL)).strip()
+        deepseek_model = str(
+            payload.get("deepseek_model", DEEPSEEK_MODEL_IDS[0])
+        ).strip()
+        deepseek_reasoning_effort = str(
+            payload.get("deepseek_reasoning_effort", "low")
+        ).strip().casefold()
         ollama_url = str(payload.get("ollama_url", _OLLAMA_DEFAULT_URL)).strip()
         if (
             not _PROVIDER_MODEL_RE.fullmatch(ollama_model)
             or not _PROVIDER_MODEL_RE.fullmatch(openai_model)
+            or deepseek_model not in DEEPSEEK_MODEL_IDS
+            or deepseek_reasoning_effort not in DEEPSEEK_REASONING_EFFORTS
             or not _valid_ollama_url(ollama_url)
         ):
             return AIProviderPreference()
-    except (FileNotFoundError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    except FileNotFoundError:
+        provider = ModelProviderId.SOLOSCALE_HOSTED
+        ollama_model = "qwen3:8b"
+        openai_model = _OPENAI_DEFAULT_MODEL
+        deepseek_model = DEEPSEEK_MODEL_IDS[0]
+        deepseek_reasoning_effort = "low"
+        ollama_url = _OLLAMA_DEFAULT_URL
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return AIProviderPreference()
-    return AIProviderPreference(
+    migrations = payload.get("migrations", {})
+    migrated = (
+        isinstance(migrations, dict)
+        and migrations.get("deepseek_provider_json") == "imported"
+    )
+    preference = AIProviderPreference(
         default_provider=provider,
         ollama_model=ollama_model,
         ollama_url=ollama_url,
         openai_model=openai_model,
+        deepseek_model=deepseek_model,
+        deepseek_reasoning_effort=deepseek_reasoning_effort,
+        validations=_parse_provider_validations(payload.get("provider_validation")),
+        legacy_deepseek_migrated=migrated,
     )
+    if (
+        not migrated
+        and "deepseek_model" not in payload
+        and "deepseek_reasoning_effort" not in payload
+        and (legacy := _legacy_deepseek_values(data_root)) is not None
+    ):
+        preference = replace(
+            preference,
+            deepseek_model=legacy[0],
+            deepseek_reasoning_effort=legacy[1],
+            legacy_deepseek_migrated=True,
+        )
+        _write_ai_provider_preference(data_root, preference)
+    return preference
 
 
 def _save_ai_provider_preference(
@@ -680,7 +970,10 @@ def _save_ai_provider_preference(
     model: str | None = None,
     ollama_url: str | None = None,
     openai_model: str | None = None,
+    deepseek_model: str | None = None,
+    deepseek_reasoning_effort: str | None = None,
     set_default: bool = True,
+    invalidate_validation: bool = False,
 ) -> AIProviderPreference:
     try:
         selected = ModelProviderId(provider)
@@ -695,39 +988,77 @@ def _save_ai_provider_preference(
         requested_openai_model = openai_model if openai_model is not None else model
         if requested_openai_model is not None:
             selected_openai_model = requested_openai_model.strip() or _OPENAI_DEFAULT_MODEL
+    selected_deepseek_model = current.deepseek_model
+    selected_deepseek_reasoning = current.deepseek_reasoning_effort
+    if selected is ModelProviderId.DEEPSEEK:
+        requested_deepseek_model = deepseek_model if deepseek_model is not None else model
+        if requested_deepseek_model is not None:
+            selected_deepseek_model = requested_deepseek_model.strip()
+        if deepseek_reasoning_effort is not None:
+            selected_deepseek_reasoning = deepseek_reasoning_effort.strip().casefold()
     selected_ollama_url = (ollama_url or current.ollama_url).strip()
     if not _PROVIDER_MODEL_RE.fullmatch(selected_ollama_model):
         raise ValueError("Local model name is invalid")
     if not _PROVIDER_MODEL_RE.fullmatch(selected_openai_model):
         raise ValueError("OpenAI model name is invalid")
+    if selected_deepseek_model not in DEEPSEEK_MODEL_IDS:
+        raise ValueError("DeepSeek model is invalid")
+    if selected_deepseek_reasoning not in DEEPSEEK_REASONING_EFFORTS:
+        raise ValueError("DeepSeek reasoning effort is invalid")
     if not _valid_ollama_url(selected_ollama_url):
         raise ValueError("Ollama URL must use the local loopback address")
-    path = _ai_provider_preference_path(data_root)
-    _reject_symlink_ancestry(path.parent)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
     preference = AIProviderPreference(
         default_provider=selected if set_default else current.default_provider,
         ollama_model=selected_ollama_model,
         ollama_url=selected_ollama_url,
         openai_model=selected_openai_model,
+        deepseek_model=selected_deepseek_model,
+        deepseek_reasoning_effort=selected_deepseek_reasoning,
+        validations=current.validations,
+        legacy_deepseek_migrated=current.legacy_deepseek_migrated,
     )
-    _atomic_private_write(
-        path,
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "default_ai_provider": preference.default_provider.value,
-                "ollama_model": preference.ollama_model,
-                "ollama_url": preference.ollama_url,
-                "openai_model": preference.openai_model,
-            },
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
+    if (
+        invalidate_validation
+        or _provider_configuration_fingerprint(current, selected)
+        != _provider_configuration_fingerprint(preference, selected)
+    ):
+        preference = replace(
+            preference,
+            validations=tuple(
+                item for item in preference.validations if item.provider is not selected
+            ),
         )
-        + "\n",
+    _write_ai_provider_preference(data_root, preference)
+    return preference
+
+
+def _record_ai_provider_validation(
+    data_root: Path,
+    *,
+    provider: ModelProviderId,
+    status: Literal["ready", "failed"],
+    detail: str,
+) -> AIProviderPreference:
+    if re.fullmatch(r"[a-z0-9_-]{1,80}", detail) is None:
+        raise ValueError("AI service validation detail is invalid")
+    current = _load_ai_provider_preference(data_root)
+    validation = AIProviderValidation(
+        provider=provider,
+        configuration_fingerprint=_provider_configuration_fingerprint(
+            current, provider
+        ),
+        status=status,
+        detail=detail,
+        checked_at=datetime.now(UTC).isoformat(),
     )
+    preference = replace(
+        current,
+        validations=tuple(
+            item for item in current.validations if item.provider is not provider
+        )
+        + (validation,),
+    )
+    _write_ai_provider_preference(data_root, preference)
     return preference
 
 
@@ -735,6 +1066,11 @@ def _apply_ai_provider_preference(form: dict[str, str], data_root: Path) -> None
     preference = _load_ai_provider_preference(data_root)
     form["generation_mode"] = preference.provider.value
     form["provider_model"] = preference.model
+    form["provider_reasoning_effort"] = (
+        preference.deepseek_reasoning_effort
+        if preference.provider is ModelProviderId.DEEPSEEK
+        else "none"
+    )
 
 
 def _valid_ollama_url(value: str) -> bool:
@@ -818,41 +1154,257 @@ def _gateway_from_preference(preference: AIProviderPreference) -> ModelGateway:
             ollama_endpoint=preference.ollama_url,
         )
     if preference.provider is ModelProviderId.OPENAI_COMPATIBLE:
+        credential = (
+            openai_api_key()
+            if _credential_provider_state(
+                preference,
+                ModelProviderId.OPENAI_COMPATIBLE,
+                credential_configured=openai_api_key_is_configured(),
+            )
+            == "ready"
+            else None
+        )
         return model_gateway_for(
             preference.provider,
             model=preference.openai_model,
             openai_endpoint=_OPENAI_CHAT_COMPLETIONS_URL,
-            openai_api_key=openai_api_key(),
+            openai_api_key=credential,
+        )
+    if preference.provider is ModelProviderId.DEEPSEEK:
+        credential = (
+            deepseek_api_key()
+            if _credential_provider_state(
+                preference,
+                ModelProviderId.DEEPSEEK,
+                credential_configured=deepseek_api_key_is_configured(),
+            )
+            == "ready"
+            else None
+        )
+        return model_gateway_for(
+            preference.provider,
+            model=preference.deepseek_model,
+            deepseek_api_key=credential,
+            deepseek_reasoning_effort=preference.deepseek_reasoning_effort,
         )
     return model_gateway_for(preference.provider)
+
+
+def _credential_provider_state(
+    preference: AIProviderPreference,
+    provider: ModelProviderId,
+    *,
+    credential_configured: bool,
+) -> Literal["not_configured", "configured_not_tested", "ready", "failed"]:
+    if not credential_configured:
+        return "not_configured"
+    validation = _provider_validation(preference, provider)
+    if validation is None:
+        return "configured_not_tested"
+    return validation.status
 
 
 def _preference_provider_configured(preference: AIProviderPreference) -> bool:
     if preference.provider is ModelProviderId.OLLAMA:
         return _ollama_readiness(preference).ready
     if preference.provider is ModelProviderId.OPENAI_COMPATIBLE:
-        return openai_api_key_is_configured()
+        return (
+            _credential_provider_state(
+                preference,
+                ModelProviderId.OPENAI_COMPATIBLE,
+                credential_configured=openai_api_key_is_configured(),
+            )
+            == "ready"
+        )
+    if preference.provider is ModelProviderId.DEEPSEEK:
+        return (
+            _credential_provider_state(
+                preference,
+                ModelProviderId.DEEPSEEK,
+                credential_configured=deepseek_api_key_is_configured(),
+            )
+            == "ready"
+        )
     return (
         model_gateway_for(ModelProviderId.SOLOSCALE_HOSTED).descriptor.configuration_state
         is GatewayConfigurationState.CONFIGURED
     )
 
 
+def _resume_credential_readiness(
+    state: Literal["not_configured", "configured_not_tested", "ready", "failed"],
+) -> ResumeAIReadiness:
+    return cast(
+        ResumeAIReadiness,
+        {
+            "not_configured": "NOT_CONFIGURED",
+            "configured_not_tested": "CONFIGURED_NOT_TESTED",
+            "ready": "READY",
+            "failed": "UNAVAILABLE",
+        }[state],
+    )
+
+
+def _resume_ai_selections(data_root: Path) -> tuple[ResumeAISelection, ...]:
+    """Return the global default plus provider-owned choices for one Resume run."""
+
+    preference = _load_ai_provider_preference(data_root)
+    local_readiness = _ollama_readiness(preference)
+    openai_configured = openai_api_key_is_configured()
+    deepseek_configured = deepseek_api_key_is_configured()
+    try:
+        hosted_gateway = model_gateway_for(ModelProviderId.SOLOSCALE_HOSTED)
+        hosted_model = hosted_gateway.descriptor.model or preference.model
+        hosted_readiness: ResumeAIReadiness = (
+            "READY"
+            if hosted_gateway.descriptor.configuration_state
+            is GatewayConfigurationState.CONFIGURED
+            else "NOT_CONFIGURED"
+        )
+    except ValueError:
+        hosted_model = preference.model
+        hosted_readiness = "UNAVAILABLE"
+
+    explicit: list[ResumeAISelection] = []
+    for model in DEEPSEEK_MODEL_IDS:
+        candidate = replace(preference, deepseek_model=model)
+        explicit.append(
+            ResumeAISelection(
+                choice_id=f"{ModelProviderId.DEEPSEEK.value}:{model}",
+                provider=ModelProviderId.DEEPSEEK,
+                model=model,
+                reasoning_effort=preference.deepseek_reasoning_effort,
+                readiness=_resume_credential_readiness(
+                    _credential_provider_state(
+                        candidate,
+                        ModelProviderId.DEEPSEEK,
+                        credential_configured=deepseek_configured,
+                    )
+                ),
+                settings_path="/settings/ai/deepseek",
+            )
+        )
+    explicit.extend(
+        (
+            ResumeAISelection(
+                choice_id=(
+                    f"{ModelProviderId.OPENAI_COMPATIBLE.value}:"
+                    f"{preference.openai_model}"
+                ),
+                provider=ModelProviderId.OPENAI_COMPATIBLE,
+                model=preference.openai_model,
+                reasoning_effort="none",
+                readiness=_resume_credential_readiness(
+                    _credential_provider_state(
+                        preference,
+                        ModelProviderId.OPENAI_COMPATIBLE,
+                        credential_configured=openai_configured,
+                    )
+                ),
+                settings_path="/settings/ai/openai",
+            ),
+            ResumeAISelection(
+                choice_id=f"{ModelProviderId.OLLAMA.value}:{preference.ollama_model}",
+                provider=ModelProviderId.OLLAMA,
+                model=preference.ollama_model,
+                reasoning_effort="none",
+                readiness="READY" if local_readiness.ready else "UNAVAILABLE",
+                settings_path="/settings/ai/local",
+            ),
+            ResumeAISelection(
+                choice_id=f"{ModelProviderId.SOLOSCALE_HOSTED.value}:{hosted_model}",
+                provider=ModelProviderId.SOLOSCALE_HOSTED,
+                model=hosted_model,
+                reasoning_effort="none",
+                readiness=hosted_readiness,
+                settings_path="/settings/ai/hosted",
+            ),
+        )
+    )
+    default = next(
+        (
+            selection
+            for selection in explicit
+            if selection.provider is preference.provider
+            and selection.model == preference.model
+        ),
+        None,
+    )
+    if default is None:
+        raise ValueError("The global AI default does not own its selected model")
+    return (replace(default, choice_id="default"), *explicit)
+
+
+def _resolve_resume_ai_selection(
+    data_root: Path, choice_id: str | None
+) -> ResumeAISelection:
+    requested = (choice_id or "default").strip() or "default"
+    for selection in _resume_ai_selections(data_root):
+        if selection.choice_id == requested:
+            return selection
+    raise ValueError("The selected AI provider/model is not available for this run")
+
+
+def _apply_resume_ai_selection(
+    form: dict[str, str], selection: ResumeAISelection
+) -> None:
+    form["generation_mode"] = selection.provider.value
+    form["provider_model"] = selection.model
+    form["provider_reasoning_effort"] = selection.reasoning_effort
+
+
+def _resume_gateway_from_selection(
+    selection: ResumeAISelection, data_root: Path
+) -> ModelGateway:
+    if not selection.ready:
+        raise ValueError(
+            f"{selection.provider.value} / {selection.model} is {selection.readiness}; "
+            "configure or test it in AI Settings before generating"
+        )
+    preference = _load_ai_provider_preference(data_root)
+    if selection.provider is ModelProviderId.OLLAMA:
+        gateway = model_gateway_for(
+            selection.provider,
+            model=selection.model,
+            ollama_endpoint=preference.ollama_url,
+            ollama_context_tokens=16_384,
+        )
+    elif selection.provider is ModelProviderId.OPENAI_COMPATIBLE:
+        gateway = model_gateway_for(
+            selection.provider,
+            model=selection.model,
+            openai_endpoint=_OPENAI_CHAT_COMPLETIONS_URL,
+            openai_api_key=openai_api_key(),
+        )
+    elif selection.provider is ModelProviderId.DEEPSEEK:
+        gateway = model_gateway_for(
+            selection.provider,
+            model=selection.model,
+            deepseek_api_key=deepseek_api_key(),
+            deepseek_reasoning_effort=selection.reasoning_effort,
+        )
+    else:
+        gateway = model_gateway_for(selection.provider)
+    if gateway.descriptor.configuration_state is not GatewayConfigurationState.CONFIGURED:
+        raise ValueError(
+            f"{selection.provider.value} / {selection.model} is not configured for this run"
+        )
+    if gateway.descriptor.provider is not selection.provider:
+        raise ValueError("The selected AI provider resolved to the wrong gateway")
+    if gateway.descriptor.model != selection.model:
+        raise ValueError("The selected model is not owned by the resolved AI provider")
+    return gateway
+
+
 def _creator_generation_mode(
     preference: AIProviderPreference, form: dict[str, str], source_kind: str
 ) -> str:
-    """Resolve one truthful generation mode for a Creator production request.
-
-    A Story/Canon action has no inline mode selector, so when the saved provider is
-    not configured we fall back to the deterministic template instead of showing a
-    confusing AI_NOT_EXECUTED with no durable package.
-    """
+    """Resolve one explicit Creator mode without switching providers or models."""
 
     explicit = form.get("generation_mode", "").strip()
-    if explicit:
-        return explicit
-    if source_kind == "STORY" and not _preference_provider_configured(preference):
+    if explicit == "template":
         return "template"
+    del source_kind
     return preference.provider.value
 
 
@@ -865,8 +1417,140 @@ def _creator_job_provider_metadata(
         return ModelProviderId.OLLAMA.value, preference.ollama_model
     if generation_mode == ModelProviderId.OPENAI_COMPATIBLE.value:
         return ModelProviderId.OPENAI_COMPATIBLE.value, preference.openai_model
+    if generation_mode == ModelProviderId.DEEPSEEK.value:
+        return ModelProviderId.DEEPSEEK.value, preference.deepseek_model
+    if generation_mode != ModelProviderId.SOLOSCALE_HOSTED.value:
+        raise ValueError("Creator AI service selection is invalid")
     hosted_model = model_gateway_for(ModelProviderId.SOLOSCALE_HOSTED).descriptor.model
     return ModelProviderId.SOLOSCALE_HOSTED.value, hosted_model
+
+
+@dataclass(frozen=True)
+class ResumeIntelligencePreflightState:
+    coverage_map: ResumeEvidenceCoverageMap
+    claim_truth: ClaimTruthResult
+    strategy: ResumeRoleStrategy
+    claims: tuple[ApplicationClaim, ...]
+    contract: ResumeGenerationContract
+    preflight: GenerationPreflight
+    coverage: CoverageReport
+    planned_render: str
+    stage_timings: dict[str, float]
+    total_seconds: float
+    ai_selection: ResumeAISelection
+
+
+def _run_resume_intelligence_preflight(
+    data_root: Path,
+    job_description: str,
+    *,
+    resume_library_root: Path | None = None,
+    owned_project_markers: tuple[str, ...] = (),
+    max_claims: int = 10,
+    ai_choice_id: str | None = None,
+    knowledge_source_kinds: tuple[SourceKind, ...] = (),
+) -> ResumeIntelligencePreflightState:
+    """Run CP2→CP3→strategy→preflight locally; no provider call is performed."""
+
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
+    mac_entries = load_discovery_catalog(data_root)
+    timings["catalog"] = time.perf_counter() - started
+    retrieval_started = time.perf_counter()
+    coverage_map = build_evidence_coverage_map(
+        job_description=job_description,
+        data_root=data_root,
+        library_root=resume_library_root,
+        mac_entries=mac_entries,
+        knowledge_source_kinds=knowledge_source_kinds,
+    )
+    timings["retrieval"] = time.perf_counter() - retrieval_started
+    truth_started = time.perf_counter()
+    claim_truth = build_claim_truth_result(
+        job_description=job_description,
+        coverage_map=coverage_map,
+        owned_project_markers=owned_project_markers,
+    )
+    timings["claim_map"] = time.perf_counter() - truth_started
+    strategy_started = time.perf_counter()
+    strategy = build_role_strategy(
+        coverage_map=coverage_map, claim_truth=claim_truth
+    )
+    claims = tuple(select_allowed_claims(claim_truth, max_claims=max_claims))
+    contract = build_generation_contract(
+        job_description=job_description, strategy=strategy, claims=claims
+    )
+    timings["strategy"] = time.perf_counter() - strategy_started
+
+    ai_selection = _resolve_resume_ai_selection(data_root, ai_choice_id)
+    preflight = build_generation_preflight(
+        job_description=job_description,
+        claim_truth=claim_truth,
+        strategy=strategy,
+        claims=claims,
+        provider=ai_selection.provider.value,
+        model=ai_selection.model,
+        reasoning_effort=ai_selection.reasoning_effort,
+        thinking_enabled=ai_selection.reasoning_effort != "none",
+        credential_configured=ai_selection.ready,
+    )
+    planned_draft = (
+        _planned_application_draft(job_description, strategy, claims)
+        if claims
+        else None
+    )
+    coverage = build_coverage_report(claim_truth=claim_truth, draft=planned_draft)
+    planned_render = (
+        render_application_resume(planned_draft)
+        if planned_draft is not None
+        else "No allowed claims yet — the Application Resume has no content."
+    )
+    return ResumeIntelligencePreflightState(
+        coverage_map=coverage_map,
+        claim_truth=claim_truth,
+        strategy=strategy,
+        claims=claims,
+        contract=contract,
+        preflight=preflight,
+        coverage=coverage,
+        planned_render=planned_render,
+        stage_timings=timings,
+        total_seconds=time.perf_counter() - started,
+        ai_selection=ai_selection,
+    )
+
+
+def _planned_application_draft(
+    job_description: str,
+    strategy: ResumeRoleStrategy,
+    claims: Sequence[ApplicationClaim],
+) -> ApplicationResumeDraft:
+    bullets: list[GeneratedResumeBullet] = []
+    for index, claim in enumerate(claims, start=1):
+        bullets.append(
+            GeneratedResumeBullet(
+                bullet_id=f"BULLET-{index:02d}",
+                section="PROJECTS",
+                text=claim.proposed_text,
+                source_claim_ids=[claim.claim_id],
+                project_identity=(
+                    strategy.selected_projects[0]
+                    if strategy.selected_projects
+                    else None
+                ),
+                contribution_mode=ContributionMode.AI_ASSISTED_USER_DIRECTED,
+                truth_boundary=claim.claim_class.value,
+            )
+        )
+    return ApplicationResumeDraft(
+        job_description_sha256=hashlib.sha256(job_description.encode()).hexdigest(),
+        headline=strategy.headline,
+        summary=strategy.positioning,
+        skills=[
+            term for term in strategy.emphasized_terms[:12] if term
+        ],
+        bullets=bullets,
+    )
 
 
 def _ollama_cli_path() -> str | None:
@@ -910,6 +1594,57 @@ def _openai_connection_status(
     except (OSError, TimeoutError, TypeError, urllib.error.URLError):
         return "test-failed"
     return "ready" if 200 <= status < 300 else "test-failed"
+
+
+def _deepseek_connection_status(
+    preference: AIProviderPreference,
+    *,
+    opener: object | None = None,
+) -> str:
+    credential = deepseek_api_key()
+    if credential is None:
+        return "not-configured"
+    direct_opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+    ).open
+    selected_opener = direct_opener if opener is None else opener
+    request = urllib.request.Request(
+        DEEPSEEK_MODELS_URL,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {credential}",
+        },
+    )
+    try:
+        with selected_opener(request, timeout=8) as response:  # type: ignore[operator]
+            status = int(getattr(response, "status", 200))
+            raw = response.read(512 * 1024 + 1)
+        if not 200 <= status < 300 or len(raw) > 512 * 1024:
+            return "test-failed"
+        payload = json.loads(raw.decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return "test-failed"
+        models = {
+            str(item.get("id", "")).strip()
+            for item in data
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            return "unauthorized"
+        return "test-failed"
+    except (
+        OSError,
+        TimeoutError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+        urllib.error.URLError,
+    ):
+        return "test-failed"
+    return "ready" if preference.deepseek_model in models else "model-unavailable"
 
 
 @dataclass(frozen=True)
@@ -1717,6 +2452,14 @@ def _build_resume_provenance_receipt(
         ]
 
     claims: list[ResumeClaimProvenance] = []
+    editorial_warning_ids = {
+        warning.claim_id
+        for warning in (
+            tailored.validation_diagnostics.editorial_warnings
+            if tailored.validation_diagnostics is not None
+            else ()
+        )
+    }
 
     def evidence_sources_for(fact_ids: list[str]) -> tuple[list[str], list[str]]:
         ordered_ids: list[str] = []
@@ -1754,6 +2497,7 @@ def _build_resume_provenance_receipt(
                 "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY",
                 "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE",
                 "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS",
+                "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW",
             ] = "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY"
         else:
             summary_evidence_ids, summary_evidence_hashes = evidence_sources_for(
@@ -1766,6 +2510,9 @@ def _build_resume_provenance_receipt(
             summary_fact_ids = summary_rewrite.source_fact_ids
             summary_status = ResumeClaimVerificationStatus.SUPPORTED
             summary_basis = "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS"
+            if "SUMMARY" in editorial_warning_ids:
+                summary_status = ResumeClaimVerificationStatus.UNVERIFIED
+                summary_basis = "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW"
         if summary_rewrite is None:
             summary_fact_ids = []
         claims.append(
@@ -1796,6 +2543,7 @@ def _build_resume_provenance_receipt(
             "EXACT_OPERATOR_APPROVED_PROFILE_ENTRY",
             "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE",
             "DETERMINISTIC_MULTI_SOURCE_SYNTHESIS",
+            "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW",
         ]
         if strategy is None:
             final_text = source_text
@@ -1834,6 +2582,9 @@ def _build_resume_provenance_receipt(
                     if rewrite.kind == "SYNTHESIS"
                     else "DETERMINISTIC_EVIDENCE_PRESERVING_REWRITE"
                 )
+                if profile_entry_id in editorial_warning_ids:
+                    status = ResumeClaimVerificationStatus.UNVERIFIED
+                    verification_basis = "EDITORIAL_PARAPHRASE_PENDING_HUMAN_REVIEW"
         expected_output_bullets.append(final_text)
         claims.append(
             ResumeClaimProvenance(
@@ -1868,6 +2619,14 @@ def _build_resume_provenance_receipt(
         hiring_signals=signal_receipts,
         claims=claims,
         unsupported_requirement_sha256s=unsupported_requirement_sha256s,
+        all_exported_claims_supported=all(
+            claim.status
+            in {
+                ResumeClaimVerificationStatus.VERIFIED,
+                ResumeClaimVerificationStatus.SUPPORTED,
+            }
+            for claim in claims
+        ),
     )
 
 
@@ -1882,15 +2641,27 @@ def _resume_provenance_summary(
         claim.status == ResumeClaimVerificationStatus.SUPPORTED
         for claim in receipt.claims
     )
+    unverified = sum(
+        claim.status == ResumeClaimVerificationStatus.UNVERIFIED
+        for claim in receipt.claims
+    )
     return {
         "artifact": "12_resume_provenance.json",
         "claim_count": len(receipt.claims),
         "verified_claim_count": verified,
         "supported_claim_count": supported,
-        "unverified_claim_count": 0,
+        "unverified_claim_count": unverified,
         "contradicted_claim_count": 0,
-        "all_exported_claims_supported": True,
+        "all_exported_claims_supported": receipt.all_exported_claims_supported,
     }
+
+
+def _resume_truth_status(provenance_summary: dict[str, object]) -> str:
+    return (
+        "VERIFIED"
+        if provenance_summary["all_exported_claims_supported"] is True
+        else "REVIEW_REQUIRED"
+    )
 
 
 def _write_resume_expert_review_receipt(
@@ -1954,6 +2725,18 @@ def _write_resume_evidence_trace(run_dir: Path, tailored: TailoredDocx) -> str |
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _resume_model_execution_truth(tailored: TailoredDocx) -> dict[str, object]:
+    """Flatten the actual model call facts used by user-facing run receipts."""
+
+    profile = tailored.model_call_profile or {}
+    return {
+        "reasoning_effort": profile.get("reasoning_effort"),
+        "real_call": profile.get("real_call", False),
+        "token_usage": profile.get("token_usage"),
+        "latency_ms": profile.get("latency_ms"),
+    }
+
+
 def _save_request_scoped_resume_run(
     *,
     data_root: Path,
@@ -1996,6 +2779,7 @@ def _save_request_scoped_resume_run(
     _write_private_json(provenance_path, provenance.model_dump(mode="json"))
     provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
     provenance_summary = _resume_provenance_summary(provenance)
+    truth_status = _resume_truth_status(provenance_summary)
     expert_review_sha256 = _write_resume_expert_review_receipt(run_dir, tailored)
     evidence_trace_sha256 = _write_resume_evidence_trace(run_dir, tailored)
     resume_text = "\n".join(
@@ -2093,7 +2877,7 @@ def _save_request_scoped_resume_run(
         "target_locale": output_locale,
         "output_locale": output_locale,
         "composition_status": "CONTENT_READY",
-        "truth_status": "VERIFIED",
+        "truth_status": truth_status,
         "docx_status": "DOCX_READY",
         "docx_render_ms": docx_render_ms,
         "pdf_status": pdf_status,
@@ -2126,6 +2910,16 @@ def _save_request_scoped_resume_run(
         "project_blocks_reordered": tailored.project_blocks_reordered,
         "skill_bullets_reordered": tailored.skill_bullets_reordered,
         "grounded_rewrites": tailored.grounded_rewrites,
+        "unverified_rewrites": tailored.unverified_rewrites,
+        "requested_edit_profile_entry_ids": list(
+            tailored.requested_edit_profile_entry_ids
+        ),
+        "requested_project_material_rewrites": (
+            tailored.requested_project_material_rewrites
+        ),
+        "requested_project_rewrite_quality_status": (
+            tailored.requested_project_rewrite_quality_status
+        ),
         "synthesized_rewrites": tailored.synthesized_rewrites,
         "summary_rewritten": tailored.summary_rewritten,
         "rejected_rewrites": tailored.rejected_rewrites,
@@ -2136,6 +2930,7 @@ def _save_request_scoped_resume_run(
         "model": tailored.model,
         "model_call_performed": tailored.role_strategy is not None,
         "model_call_profile": tailored.model_call_profile,
+        **_resume_model_execution_truth(tailored),
         "candidate_evidence_pack_sha256": pack.pack_sha256 if pack else None,
         "evidence_retrieval_trace_sha256": evidence_trace_sha256,
         "candidate_evidence_fact_count": len(pack.atomic_facts) if pack else 0,
@@ -2187,8 +2982,13 @@ def _save_request_scoped_resume_run(
         in {
             ModelProviderId.SOLOSCALE_HOSTED.value,
             ModelProviderId.OPENAI_COMPATIBLE.value,
+            ModelProviderId.DEEPSEEK.value,
         }
-        or tailored.expert_provider == ModelProviderId.OPENAI_COMPATIBLE.value,
+        or tailored.expert_provider
+        in {
+            ModelProviderId.OPENAI_COMPATIBLE.value,
+            ModelProviderId.DEEPSEEK.value,
+        },
         "mock_only_hosted_boundary": False,
         "tailoring_instructions_sha256": hashlib.sha256(
             tailoring_instructions.encode("utf-8")
@@ -2230,7 +3030,7 @@ def _save_request_scoped_resume_run(
             "candidate_profile_sha256": candidate_sha256,
             "resume_sha256": tailored.output_sha256,
             "resume_provenance_sha256": provenance_sha256,
-            "all_exported_claims_supported": True,
+            "all_exported_claims_supported": provenance.all_exported_claims_supported,
             "expert_review_performed": tailored.expert_review is not None,
             "expert_review_attempted": tailored.expert_review_attempted,
             "expert_review_skipped_code": tailored.expert_review_skipped_code,
@@ -2241,6 +3041,7 @@ def _save_request_scoped_resume_run(
             "provider": tailored.provider or "template",
             "model": tailored.model,
             "model_call_profile": tailored.model_call_profile,
+            **_resume_model_execution_truth(tailored),
             "final_human_review_required": True,
             "job_application_submitted": False,
             "template_receipt_sha256": (
@@ -2282,7 +3083,7 @@ def _save_request_scoped_resume_run(
             "target_locale": output_locale,
             "output_locale": output_locale,
             "composition_status": "CONTENT_READY",
-            "truth_status": "VERIFIED",
+            "truth_status": truth_status,
             "docx_status": "DOCX_READY",
             "docx_render_ms": docx_render_ms,
             "pdf_status": pdf_status,
@@ -2360,6 +3161,7 @@ def _run_user_resume(
         ModelProviderId.SOLOSCALE_HOSTED.value,
         ModelProviderId.OLLAMA.value,
         ModelProviderId.OPENAI_COMPATIBLE.value,
+        ModelProviderId.DEEPSEEK.value,
         "template",
     }:
         return UIActionResult(
@@ -2400,7 +3202,7 @@ def _run_user_resume(
     expert_review_mode = form.get("expert_review_mode", "local").strip()
     if generation_mode == "template":
         expert_review_mode = "local"
-    if expert_review_mode not in {"local", "openai_sol"}:
+    if expert_review_mode not in {"local", "ai", "openai_sol"}:
         return UIActionResult(
             "tailored-resume",
             "resume expert review",
@@ -2409,7 +3211,7 @@ def _run_user_resume(
             "Expert review mode is invalid.",
             0,
         )
-    if output_language == "both" and expert_review_mode == "openai_sol":
+    if output_language == "both" and expert_review_mode != "local":
         return UIActionResult(
             "tailored-resume",
             "resume expert review",
@@ -2418,14 +3220,19 @@ def _run_user_resume(
             "Generate bilingual base resumes first; optional expert review is available one locale at a time.",
             0,
         )
-    if expert_review_mode == "openai_sol":
+    if expert_review_mode in {"ai", "openai_sol"}:
         if form.get("approve_expert_review") != "yes":
+            approval_message = (
+                "请明确确认本次 GPT-5.6 Sol 专家审阅会使用你的 OpenAI API 账户。"
+                if expert_review_mode == "openai_sol"
+                else "请明确确认本次会使用你选择的 AI 服务执行一次专家审阅。"
+            )
             return UIActionResult(
                 "tailored-resume",
                 "resume expert review",
                 2,
                 "",
-                "请明确确认本次 GPT-5.6 Sol 专家审阅会使用你的 OpenAI API 账户。",
+                approval_message,
                 0,
             )
         if (
@@ -2433,12 +3240,17 @@ def _run_user_resume(
             or expert_gateway.descriptor.configuration_state
             is not GatewayConfigurationState.CONFIGURED
         ):
+            unavailable_message = (
+                "GPT-5.6 Sol 专家审阅尚未配置；没有发送审阅请求。"
+                if expert_review_mode == "openai_sol"
+                else "所选 AI 专家审阅服务尚未就绪；没有发送审阅请求。"
+            )
             return UIActionResult(
                 "tailored-resume",
                 "resume expert review",
                 1,
                 "",
-                "GPT-5.6 Sol 专家审阅尚未配置；没有发送审阅请求。",
+                unavailable_message,
                 0,
             )
     if upload is None or not upload.content:
@@ -2512,6 +3324,7 @@ def _run_user_resume(
             )
         profile_started = time.perf_counter()
         profile = extract_candidate_profile(template_bytes)
+        validate_resume_profile_entry_count(profile)
         if timing is not None:
             timing(
                 "profile_extract_ms",
@@ -2579,6 +3392,16 @@ def _run_user_resume(
             selected_gateway = gateway or model_gateway_for(
                 generation_mode,
                 model=form.get("provider_model", "qwen3:8b"),
+                ollama_context_tokens=(
+                    16_384
+                    if generation_mode == ModelProviderId.OLLAMA.value
+                    else None
+                ),
+                ollama_timeout_seconds=(
+                    600
+                    if generation_mode == ModelProviderId.OLLAMA.value
+                    else None
+                ),
             )
             assert candidate_evidence_pack is not None
             gateway_template_metadata = (
@@ -2600,6 +3423,11 @@ def _run_user_resume(
                     candidate_recorder=candidate_recorder,
                     candidate_evidence_pack=candidate_evidence_pack,
                     output_locale=output_locale,
+                    reasoning_effort=(
+                        "none"
+                        if form.get("provider_reasoning_effort", "none") == "none"
+                        else "low"
+                    ),
                 )
                 # The gateway receives only verified atomic facts. Body-free local
                 # discovery lineage is attached after that boundary completes.
@@ -2641,7 +3469,7 @@ def _run_user_resume(
                 "verification_ms",
                 int((time.perf_counter() - verification_started) * 1000),
             )
-        if expert_review_mode == "openai_sol":
+        if expert_review_mode in {"ai", "openai_sol"}:
             if progress is not None:
                 progress("EXPERT_REVIEW")
             expert_started = time.perf_counter()
@@ -2655,6 +3483,12 @@ def _run_user_resume(
                     tailored,
                     profile=profile,
                     gateway=selected_expert_gateway,
+                    reasoning_effort=(
+                        "none"
+                        if form.get("expert_review_reasoning_effort", "low")
+                        == "none"
+                        else "low"
+                    ),
                 )
                 expert_candidate_recorder(
                     _expert_review_candidate_artifact(
@@ -2820,6 +3654,7 @@ def _run_user_resume(
                 "project_blocks_reordered": tailored.project_blocks_reordered,
                 "skill_bullets_reordered": tailored.skill_bullets_reordered,
                 "grounded_rewrites": tailored.grounded_rewrites,
+                "unverified_rewrites": tailored.unverified_rewrites,
                 "synthesized_rewrites": tailored.synthesized_rewrites,
                 "summary_rewritten": tailored.summary_rewritten,
                 "rejected_rewrites": tailored.rejected_rewrites,
@@ -2888,6 +3723,7 @@ def _run_user_resume(
         _write_private_json(provenance_path, provenance.model_dump(mode="json"))
         provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
         provenance_summary = _resume_provenance_summary(provenance)
+        truth_status = _resume_truth_status(provenance_summary)
         expert_review_sha256 = _write_resume_expert_review_receipt(run_dir, tailored)
         evidence_trace_sha256 = _write_resume_evidence_trace(run_dir, tailored)
         verification_path = run_dir / "07_verification.json"
@@ -2920,7 +3756,7 @@ def _run_user_resume(
             "target_locale": tailored.output_locale,
             "output_locale": tailored.output_locale,
             "composition_status": "CONTENT_READY",
-            "truth_status": "VERIFIED",
+            "truth_status": truth_status,
             "docx_status": "DOCX_READY",
             "docx_render_ms": docx_render_ms,
             "pdf_status": pdf_status,
@@ -2957,6 +3793,16 @@ def _run_user_resume(
             "project_blocks_reordered": tailored.project_blocks_reordered,
             "skill_bullets_reordered": tailored.skill_bullets_reordered,
             "grounded_rewrites": tailored.grounded_rewrites,
+            "unverified_rewrites": tailored.unverified_rewrites,
+            "requested_edit_profile_entry_ids": list(
+                tailored.requested_edit_profile_entry_ids
+            ),
+            "requested_project_material_rewrites": (
+                tailored.requested_project_material_rewrites
+            ),
+            "requested_project_rewrite_quality_status": (
+                tailored.requested_project_rewrite_quality_status
+            ),
             "synthesized_rewrites": tailored.synthesized_rewrites,
             "summary_rewritten": tailored.summary_rewritten,
             "rejected_rewrites": tailored.rejected_rewrites,
@@ -2967,6 +3813,7 @@ def _run_user_resume(
             "model": tailored.model,
             "model_call_performed": tailored.role_strategy is not None,
             "model_call_profile": tailored.model_call_profile,
+            **_resume_model_execution_truth(tailored),
             "candidate_evidence_pack_sha256": (
                 candidate_evidence_pack.pack_sha256
                 if candidate_evidence_pack is not None
@@ -3037,9 +3884,14 @@ def _run_user_resume(
                 in {
                     ModelProviderId.SOLOSCALE_HOSTED,
                     ModelProviderId.OPENAI_COMPATIBLE,
+                    ModelProviderId.DEEPSEEK,
                 }
             )
-            or tailored.expert_provider == ModelProviderId.OPENAI_COMPATIBLE.value,
+            or tailored.expert_provider
+            in {
+                ModelProviderId.OPENAI_COMPATIBLE.value,
+                ModelProviderId.DEEPSEEK.value,
+            },
             "mock_only_hosted_boundary": False,
             "tailoring_instructions_sha256": hashlib.sha256(
                 tailoring_instructions.encode("utf-8")
@@ -3076,7 +3928,7 @@ def _run_user_resume(
             ).hexdigest(),
             "resume_sha256": tailored.output_sha256,
             "resume_provenance_sha256": provenance_sha256,
-            "all_exported_claims_supported": True,
+            "all_exported_claims_supported": provenance.all_exported_claims_supported,
             "expert_review_performed": tailored.expert_review is not None,
             "expert_review_attempted": tailored.expert_review_attempted,
             "expert_review_skipped_code": tailored.expert_review_skipped_code,
@@ -3088,6 +3940,7 @@ def _run_user_resume(
             "model": tailored.model,
             "model_call_performed": tailored.role_strategy is not None,
             "model_call_profile": tailored.model_call_profile,
+            **_resume_model_execution_truth(tailored),
             "model_gap_quotes": (
                 tailored.role_strategy.unsupported_requirements
                 if tailored.role_strategy is not None
@@ -3111,7 +3964,7 @@ def _run_user_resume(
         route["resume_provenance_sha256"] = provenance_sha256
         route["preview_generated"] = preview_created
         route["composition_status"] = "CONTENT_READY"
-        route["truth_status"] = "VERIFIED"
+        route["truth_status"] = truth_status
         route["docx_status"] = "DOCX_READY"
         route["docx_render_ms"] = docx_render_ms
         route["pdf_status"] = pdf_status
@@ -3152,6 +4005,16 @@ def _run_user_resume(
             1,
             "",
             "SoloScale 托管 AI 尚未连接到这个本地版本；没有生成通用简历，也没有保存新的申请包。请配置高级 AI 服务，或明确选择安全离线草稿。",
+            elapsed_ms,
+        )
+    except ModelGatewayTimeoutError:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        return UIActionResult(
+            "tailored-resume",
+            "AI resume generation",
+            1,
+            "",
+            "所选 AI 服务处理超时；本次没有重试、回退或保存新的申请包。",
             elapsed_ms,
         )
     except ModelGatewayTransportError:
@@ -3653,10 +4516,18 @@ def _human_ai_service_label(
     model_label = (model or "").strip()
     if provider_key in {"openai_compatible", "openai", "openai_sol"}:
         base = ui_text(locale, "OpenAI 兼容服务", "OpenAI-compatible service")
+        if model_label == _OPENAI_EXPERT_REVIEW_MODEL:
+            model_label = "GPT-5.6 Sol"
     elif provider_key == "ollama":
         base = ui_text(locale, "本地 Ollama", "Local Ollama")
     elif provider_key == "soloscale_hosted":
         base = ui_text(locale, "SoloScale 托管 AI", "SoloScale Hosted AI")
+    elif provider_key == "deepseek":
+        base = "DeepSeek"
+        model_label = {
+            "deepseek-v4-flash": "DeepSeek V4 Flash",
+            "deepseek-v4-pro": "DeepSeek V4 Pro",
+        }.get(model_label, model_label)
     elif provider_key == "template":
         return ui_text(locale, "安全离线模板", "Safe offline template")
     else:
@@ -3863,10 +4734,14 @@ def _resume_provenance_panel(
             locale,
             "原文已核对"
             if claim.status == ResumeClaimVerificationStatus.VERIFIED
-            else "改写有支持",
+            else "改写有支持"
+            if claim.status == ResumeClaimVerificationStatus.SUPPORTED
+            else "编辑草稿，需人工核对",
             "Exact source verified"
             if claim.status == ResumeClaimVerificationStatus.VERIFIED
-            else "Rewrite supported",
+            else "Rewrite supported"
+            if claim.status == ResumeClaimVerificationStatus.SUPPORTED
+            else "Editorial draft, human review required",
         )
         signal_label = ui_text(
             locale,
@@ -3881,14 +4756,20 @@ def _resume_provenance_panel(
             "</article>"
         )
     counts = _resume_provenance_summary(receipt)
+    review_notice = (
+        f'<p class="hint">{_escape(ui_text(locale, "部分改写需要你确认，投递前请核对这些内容。", "Some rewrites need your confirmation. Review them before applying."))}</p>'
+        if not receipt.all_exported_claims_supported
+        else ""
+    )
     return f'''<details class="resume-provenance">
   <summary>{_escape(ui_text(locale, "为什么这些内容会出现在我的简历里？", "Why is this on my resume?"))}</summary>
-  <p>{_escape(ui_text(locale, "每条最终 bullet 都绑定到一条你批准的简历事实。AI 改写必须保留已核对事实，无法支持的内容不会进入 DOCX。", "Every final bullet is bound to one approved resume fact. AI rewrites must preserve checked facts; unsupported content cannot enter the DOCX."))}</p>
+  <p>{_escape(ui_text(locale, "每条最终 bullet 都关联你批准的原始材料。AI 可以在事实边界内改写内容；标为待审的条目需要你在投递前核对。", "Every final bullet is linked to material you approved. AI may rewrite within the fact boundary; marked draft items need your review before applying."))}</p>
   <div class="provenance-summary">
     <strong>{_escape(str(counts["claim_count"]))}</strong>
     <span>{_escape(ui_text(locale, "条可追溯 bullet", "traceable bullets"))}</span>
   </div>
   <div class="provenance-claims">{"".join(rows)}</div>
+  {review_notice}
   <p class="hint">{_escape(ui_text(locale, "为保护隐私，本次回执只保存批准事实的 ID 和哈希，不复制原始简历或 JD 正文。连接本地工作资料后，可再查看项目、代码和 BuildLog 锚点。", "For privacy, this receipt keeps approved fact IDs and hashes without copying the source resume or JD bodies. After connecting local work, project, code, and BuildLog anchors can be shown."))}</p>
 </details>'''
 
@@ -4179,6 +5060,37 @@ def _user_result_card(
     pdf_status = str(user_metadata.get("pdf_status", "PENDING"))
     output_name = str(user_metadata.get("output_filename", "Tailored Resume.docx"))
     output_locale = str(user_metadata.get("output_locale", "en-US"))
+    review_required = user_metadata.get("truth_status") == "REVIEW_REQUIRED"
+    review_required_notice = (
+        '<p class="notice" role="status">'
+        + _escape(
+            ui_text(
+                locale,
+                "编辑草稿，需人工核对：部分改写需要你确认，投递前请核对这些内容。",
+                "Editorial draft, human review required: Some rewrites need your confirmation. Review them before applying.",
+            )
+        )
+        + "</p>"
+        if review_required
+        else ""
+    )
+    focused_quality_not_met = (
+        user_metadata.get("requested_project_rewrite_quality_status")
+        == "QUALITY_NOT_MET"
+    )
+    focused_quality_notice = (
+        '<p class="notice" role="status">'
+        + _escape(
+            ui_text(
+                locale,
+                "本次项目改写未达到两条实质修改的检查要求；请人工核对后再使用此草稿。",
+                "This draft did not meet the two-project material-edit check. Review it before use.",
+            )
+        )
+        + "</p>"
+        if focused_quality_not_met
+        else ""
+    )
     internal_path = str(user_metadata.get("internal_docx", run_dir / "08_resume.docx"))
     external_path = str(user_metadata.get("external_docx", ""))
     project_count = user_metadata.get("project_blocks_reordered", 0)
@@ -4295,10 +5207,15 @@ def _user_result_card(
             )
         if user_metadata.get("expert_review_performed") is True:
             expert_rewrites = user_metadata.get("expert_rewrites", 0)
+            expert_service = _human_ai_service_label(
+                locale,
+                str(user_metadata.get("expert_review_provider") or ""),
+                str(user_metadata.get("expert_review_model") or ""),
+            )
             result_summary += ui_text(
                 locale,
-                f" 随后由 GPT-5.6 Sol 提交 {expert_rewrites} 个 patch，并在本地再次通过事实校验。",
-                f" GPT-5.6 Sol then proposed {expert_rewrites} patches, which passed the local fact verifier again.",
+                f" 随后由 {expert_service} 提交 {expert_rewrites} 个 patch，并在本地再次通过事实校验。",
+                f" {expert_service} then proposed {expert_rewrites} patches, which passed the local fact verifier again.",
             )
             privacy_note += ui_text(
                 locale,
@@ -4321,6 +5238,12 @@ def _user_result_card(
             locale,
             "本次是明确选择的安全离线草稿；没有模型或网络调用。",
             "This was an explicitly selected safe offline draft. No model or network call occurred.",
+        )
+    if focused_quality_not_met:
+        result_summary = ui_text(
+            locale,
+            "已生成可核对的简历草稿，但项目改写未达到两条实质修改的检查要求。",
+            "A reviewable resume draft was generated, but it did not meet the two-project material-edit check.",
         )
     download = (
         f'<a class="primary-button download" href="{_escape(download_url)}" download '
@@ -4408,8 +5331,14 @@ def _user_result_card(
     )
     result_heading = ui_text(
         locale,
-        "简历可先下载，预览正在生成" if job_running else "针对性简历已生成",
-        "Your resume can be downloaded while preview finishes"
+        "简历草稿待人工核对"
+        if focused_quality_not_met
+        else "简历可先下载，预览正在生成"
+        if job_running
+        else "针对性简历已生成",
+        "Resume draft needs human review"
+        if focused_quality_not_met
+        else "Your resume can be downloaded while preview finishes"
         if job_running
         else "Your tailored resume is ready",
     )
@@ -4426,6 +5355,8 @@ def _user_result_card(
     {download}
   </div>
   <p class="privacy-note"><strong>{_escape(ui_text(locale, '输出语言', 'Output language'))}:</strong> {_escape(output_locale)}</p>
+  {review_required_notice}
+  {focused_quality_notice}
   {f'<div class="resume-variant-downloads">{"".join(variant_cards)}</div>' if variant_cards else ''}
   <div class="metrics" aria-label="{_escape(ui_text(locale, '覆盖情况', 'Coverage'))}">
     <div><strong>{_escape(str(coverage.get("total", 0)))}</strong><span>{_escape(ui_text(locale, '岗位要求', 'Requirements'))}</span></div>
@@ -4851,6 +5782,62 @@ def _localized_file_input(
     return f'''<span class="file-control"><input class="file-native" type="file" name="{_escape(name)}" accept="{_escape(accept)}"{required_attr} data-file-placeholder="{_escape(placeholder)}" /><span class="file-button" aria-hidden="true">{_escape(button_label)}</span><span class="file-name" data-file-name-for="{_escape(name)}">{_escape(placeholder)}</span></span>'''
 
 
+def _resume_ai_provider_name(
+    selection: ResumeAISelection, locale: UILocale
+) -> str:
+    if selection.provider is ModelProviderId.OLLAMA:
+        return ui_text(locale, "本地 AI", "Local AI")
+    return model_provider_catalog_entry(selection.provider).display_name
+
+
+def _resume_ai_model_name(selection: ResumeAISelection) -> str:
+    if selection.provider is ModelProviderId.DEEPSEEK:
+        return {
+            "deepseek-v4-flash": "DeepSeek V4 Flash",
+            "deepseek-v4-pro": "DeepSeek V4 Pro",
+        }.get(selection.model, selection.model)
+    if selection.provider is ModelProviderId.OPENAI_COMPATIBLE:
+        if selection.model == _OPENAI_EXPERT_REVIEW_MODEL:
+            return "GPT-5.6 Sol"
+        if selection.model == _OPENAI_DEFAULT_MODEL:
+            return "GPT-5"
+    return selection.model
+
+
+def _resume_ai_selection_label(
+    selection: ResumeAISelection, locale: UILocale
+) -> str:
+    reasoning = (
+        f" · {selection.reasoning_effort.title()}"
+        if selection.provider is ModelProviderId.DEEPSEEK
+        else ""
+    )
+    return (
+        f"{_resume_ai_provider_name(selection, locale)} · "
+        f"{_resume_ai_model_name(selection)}{reasoning}"
+    )
+
+
+def _resume_ai_option(
+    selection: ResumeAISelection,
+    locale: UILocale,
+    *,
+    selected: bool,
+    prefix: str = "",
+) -> str:
+    summary = _resume_ai_selection_label(selection, locale)
+    label = f"{prefix}{summary} — {selection.readiness}"
+    return (
+        f'<option value="{_escape(selection.choice_id)}" '
+        f'data-provider="{_escape(selection.provider.value)}" '
+        f'data-model="{_escape(selection.model)}" '
+        f'data-summary="{_escape(summary)}" '
+        f'data-readiness="{_escape(selection.readiness)}" '
+        f'data-settings-path="{_escape(ui_url(selection.settings_path, locale))}" '
+        f'{"selected" if selected else ""}>{_escape(label)}</option>'
+    )
+
+
 def _user_page(
     action_result: UIActionResult | None,
     data_root: Path,
@@ -4868,35 +5855,82 @@ def _user_page(
     job_title = _escape(form.get("job_title", ""))
     job_id = _escape(form.get("job_id", ""))
     tailoring_instructions = _escape(form.get("tailoring_instructions", ""))
-    generation_mode = form.get(
-        "generation_mode", ModelProviderId.SOLOSCALE_HOSTED.value
+    selections = _resume_ai_selections(data_root)
+    requested_selection = form.get("resume_ai_selection", "default")
+    selected_ai = next(
+        (
+            selection
+            for selection in selections
+            if selection.choice_id == requested_selection
+        ),
+        selections[0],
     )
-    if generation_mode not in {
-        ModelProviderId.SOLOSCALE_HOSTED.value,
-        ModelProviderId.OLLAMA.value,
-        ModelProviderId.OPENAI_COMPATIBLE.value,
-        "template",
-    }:
-        generation_mode = ModelProviderId.SOLOSCALE_HOSTED.value
-    provider_model = _escape(form.get("provider_model", "qwen3:8b"))
-    expert_review_configured = openai_api_key_is_configured()
+    selected_ai_label = _resume_ai_selection_label(selected_ai, locale)
+    ai_options = "".join(
+        _resume_ai_option(
+            selection,
+            locale,
+            selected=selection.choice_id == selected_ai.choice_id,
+            prefix=(
+                ui_text(locale, "使用全局默认：", "Use global default — ")
+                if selection.choice_id == "default"
+                else ""
+            ),
+        )
+        for selection in selections
+    )
+    expert_review_mode = (
+        "ai"
+        if form.get("expert_review_mode", "local") in {"ai", "openai_sol"}
+        else "local"
+    )
+    requested_expert_selection = form.get("expert_ai_selection", "generation")
+    selected_expert_ai = (
+        selected_ai
+        if requested_expert_selection == "generation"
+        else next(
+            (
+                selection
+                for selection in selections
+                if selection.choice_id == requested_expert_selection
+            ),
+            selected_ai,
+        )
+    )
+    expert_options = _resume_ai_option(
+        replace(selected_ai, choice_id="generation"),
+        locale,
+        selected=requested_expert_selection == "generation",
+        prefix=ui_text(locale, "使用生成模型：", "Use generation model — "),
+    ) + "".join(
+        _resume_ai_option(
+            selection,
+            locale,
+            selected=(
+                requested_expert_selection != "generation"
+                and selection.choice_id == selected_expert_ai.choice_id
+            ),
+        )
+        for selection in selections[1:]
+    )
+    expert_authorization_note = (
+        ui_text(
+            locale,
+            "本次审阅将使用你的 OpenAI API 账户。",
+            "This review uses your OpenAI API account.",
+        )
+        if selected_expert_ai.provider is ModelProviderId.OPENAI_COMPATIBLE
+        else ui_text(
+            locale,
+            f"本次审阅将使用 {_resume_ai_selection_label(selected_expert_ai, locale)}。",
+            f"This review uses {_resume_ai_selection_label(selected_expert_ai, locale)}.",
+        )
+    )
     resume_library_root = (
         data_root / "resume-applications"
         if desktop_mode
         else Path.home() / "Documents" / "Resume Applications"
     )
-    provider_label = {
-        ModelProviderId.SOLOSCALE_HOSTED.value: ui_text(
-            locale, "SoloScale 托管 AI · 推荐", "SoloScale Hosted AI · Recommended"
-        ),
-        ModelProviderId.OLLAMA.value: ui_text(
-            locale, "本地 AI · 高级", "Local AI · Advanced"
-        ),
-        ModelProviderId.OPENAI_COMPATIBLE.value: ui_text(
-            locale, "OpenAI API · 高级", "OpenAI API · Advanced"
-        ),
-        "template": ui_text(locale, "安全离线草稿 · 不使用 AI", "Safe offline draft · No AI"),
-    }[generation_mode]
     workspace_class = (
         "workspace has-result"
         if action_result is not None and action_result.return_code == 0
@@ -4952,7 +5986,8 @@ def _user_page(
     applications_section = _applications_section_html(
         resume_library_root, locale=locale
     )
-    body = f"""{work_summary}{applications_section}{job_panel}<div class="{workspace_class}">
+    canonical_banner = f'''<section class="notice info"><strong>{_escape(ui_text(locale, '简历智能预检', 'Resume Intelligence preflight'))}</strong> — {_escape(ui_text(locale, '证据检索与真实性分级只生成预检；现有简历生成与导出流程保持不变。', 'Evidence retrieval and claim grading are preflight only; the existing resume generation and export flow remains unchanged.'))} <a class="button-link" href="{ui_url('/resume/intelligence', locale)}">{_escape(ui_text(locale, '打开预检', 'Open preflight'))}</a></section>'''
+    body = f"""{work_summary}{applications_section}{job_panel}{canonical_banner}<div class="{workspace_class}">
       <section class="input-card">
         <span class="result-kicker">{_escape(ui_text(locale, '输入', 'Input'))}</span>
         <h2>{_escape(ui_text(locale, '简历 + Job Description', 'Resume + Job Description'))}</h2>
@@ -4978,7 +6013,6 @@ def _user_page(
         </details>
         <form id="resume-form" method="post" action="/generate" enctype="multipart/form-data">
           <input type="hidden" name="ui_locale" value="{locale}" />
-          <input type="hidden" name="provider_model" value="{provider_model}" />
           <input type="hidden" name="resume_template_preview_id" value="{_escape(template_receipt.preview_id if template_receipt is not None else '')}" />
           <label>{_escape(ui_text(locale, '输出语言', 'Output language'))}
             <select name="resume_output_language">
@@ -5029,31 +6063,40 @@ def _user_page(
             {_escape(ui_text(locale, '你选择的原始文件只在本次请求中处理，不会长期保存。SoloScale 仅私密保留生成结果与无正文回执，供你预览和下载。', 'Your selected source files are processed only for this request and are not retained long term. SoloScale privately keeps only the generated result and a body-free receipt for preview and download.'))}
           </div>
           <div class="provider-summary">
-            <span>{_escape(ui_text(locale, '本次生成方式', 'Generation mode'))}</span>
-            <strong>{_escape(provider_label)}</strong>
-            <a href="{ui_url('/settings/ai', locale)}">{_escape(ui_text(locale, '在设置中更换 AI 服务', 'Change AI service in Settings'))}</a>
+            <span>{_escape(ui_text(locale, '本次 AI 服务', 'AI service for this run'))}</span>
+            <label>{_escape(ui_text(locale, '选择服务与模型', 'Choose provider and model'))}
+              <select id="resume-ai-selection" name="resume_ai_selection">{ai_options}</select>
+            </label>
+            <strong id="resume-ai-summary">{_escape(selected_ai_label)}</strong>
+            <span id="resume-ai-readiness" class="status-badge" data-readiness="{_escape(selected_ai.readiness)}">{_escape(selected_ai.readiness)}</span>
+            <a id="resume-ai-settings-link" href="{ui_url(selected_ai.settings_path, locale)}">{_escape(ui_text(locale, '配置或测试此服务', 'Configure or test this service'))}</a>
+            <small>{_escape(ui_text(locale, '这里的选择只用于本次简历，不会更改全局默认。', 'This selection applies only to this resume run and never changes the global default.'))}</small>
           </div>
           <fieldset class="expert-review-choice">
             <legend>{_escape(ui_text(locale, '最终审阅', 'Final review'))}</legend>
-            <label><input type="radio" name="expert_review_mode" value="local" checked />
-              <span><strong>{_escape(ui_text(locale, '本地事实校验', 'Local fact verification'))}</strong><small>{_escape(ui_text(locale, '默认，不产生额外 API 费用。', 'Default; no additional API cost.'))}</small></span>
+            <label><input type="radio" name="expert_review_mode" value="local" {'checked' if expert_review_mode != 'ai' else ''} />
+              <span><strong>{_escape(ui_text(locale, '确定性本地审阅', 'Deterministic local review'))}</strong><small>{_escape(ui_text(locale, '0 次模型调用，不产生额外 API 费用。', '0 model calls and no additional API cost.'))}</small></span>
             </label>
-            <label><input id="expert-review-sol" type="radio" name="expert_review_mode" value="openai_sol" {'disabled' if not expert_review_configured else ''} />
-              <span><strong>GPT-5.6 Sol Expert Review</strong><small>{_escape(ui_text(locale, '只发送 JD 信号、支持片段和当前草稿；返回 patch 后会在本地再次核验。', 'Sends only JD signals, supporting fragments, and the current draft. Returned patches are verified locally again.'))}</small></span>
+            <label><input id="expert-review-ai" type="radio" name="expert_review_mode" value="ai" {'checked' if expert_review_mode == 'ai' else ''} />
+              <span><strong>{_escape(ui_text(locale, 'AI 专家审阅', 'AI Expert Review'))}</strong><small>{_escape(ui_text(locale, '只发送 JD 信号、支持片段和当前草稿；返回 patch 后会在本地再次核验。', 'Sends only JD signals, supporting fragments, and the current draft. Returned patches are verified locally again.'))}</small></span>
             </label>
+            <label id="expert-ai-provider">{_escape(ui_text(locale, '审阅服务与模型', 'Review provider and model'))}
+              <select id="expert-ai-selection" name="expert_ai_selection">{expert_options}</select>
+            </label>
+            <p id="expert-ai-summary" class="hint">{_escape(expert_authorization_note)} <strong>{_escape(selected_expert_ai.readiness)}</strong></p>
+            <a id="expert-ai-settings-link" href="{ui_url(selected_expert_ai.settings_path, locale)}">{_escape(ui_text(locale, '配置或测试审阅服务', 'Configure or test review service'))}</a>
             <label id="expert-review-approval" class="expert-review-approval"><input type="checkbox" name="approve_expert_review" value="yes" />
-              {_escape(ui_text(locale, '我批准本次使用我的 OpenAI API 账户执行一次专家审阅。', 'I approve one expert-review request using my OpenAI API account.'))}
+              {_escape(ui_text(locale, '我批准使用上方明确选择的服务与模型执行一次 AI 专家审阅。', 'I authorize one AI expert-review request using the provider and model explicitly selected above.'))}
             </label>
-            {'' if expert_review_configured else f'<p class="hint">{_escape(ui_text(locale, "先在设置中配置 OpenAI，才能启用可选专家审阅。", "Configure OpenAI in Settings to enable optional expert review."))}</p>'}
           </fieldset>
           <label><input type="checkbox" name="approve_resume_processing" value="yes" required />
             {_escape(ui_text(locale, '我确认简历事实真实，并授权本次处理我主动选择的简历、JD 和可选支持文件。AI 只接收已清洗的简历事实、完整 JD、支持摘要和模板结构；姓名、联系方式、文件名、本地路径、ChatGPT/Codex 对话与项目文件不会发送。', 'I confirm the resume facts are truthful and authorize this task to process only the resume, JD, and optional support file I selected. AI receives only sanitized resume facts, the full JD, a support summary, and allowlisted template structure. Names, contact details, filenames, local paths, ChatGPT/Codex histories, and project files are not sent.'))}
           </label>
-          <p class="privacy-note">{_escape(ui_text(locale, 'SoloScale 会使用当前默认 AI 服务；若该服务不可用，本次生成会明确停止，不会静默改用其他服务或通用模板。', 'SoloScale uses the current default AI service. If it is unavailable, this run stops clearly instead of silently switching services or returning a generic template.'))}</p>
+          <p class="privacy-note">{_escape(ui_text(locale, 'SoloScale 会使用上方为本次运行解析出的服务与模型；若不可用，本次生成会明确停止，不会静默改用其他服务、模型或模板。', 'SoloScale uses the provider and model resolved above for this run. If unavailable, generation stops clearly without silently switching provider, model, or template.'))}</p>
           <div id="progress" role="status" aria-live="polite">{_escape(ui_text(locale, '正在读取模板并核对 JD…', 'Reading the template and checking the JD…'))}</div>
           <div class="generate-actions">
-            <button id="generate-button" class="primary-button" type="submit" name="generation_mode" value="{_escape(generation_mode)}">{_escape(ui_text(locale, '使用当前 AI 服务生成', 'Generate with the selected AI service') if generation_mode != 'template' else ui_text(locale, '生成安全离线草稿', 'Generate safe offline draft'))}</button>
-            {'' if generation_mode == 'template' else f'<button class="secondary-button" type="submit" name="generation_mode" value="template">{_escape(ui_text(locale, "明确改用安全离线草稿", "Explicitly use a safe offline draft"))}</button>'}
+            <button id="generate-button" class="primary-button" type="submit" {'disabled' if not selected_ai.ready else ''}>{_escape(ui_text(locale, '使用本次选择生成', 'Generate with this selection'))}</button>
+            <button class="secondary-button" type="submit" name="generation_mode" value="template">{_escape(ui_text(locale, '明确改用安全离线草稿', 'Explicitly use a safe offline draft'))}</button>
           </div>
         </form>
       </section>
@@ -5066,13 +6109,60 @@ def _user_page(
     )
     script = f"""
     const resumeForm=document.getElementById('resume-form');
-    const expertReview=document.getElementById('expert-review-sol');
+    const generationSelection=document.getElementById('resume-ai-selection');
+    const generationSummary=document.getElementById('resume-ai-summary');
+    const generationReadiness=document.getElementById('resume-ai-readiness');
+    const generationSettings=document.getElementById('resume-ai-settings-link');
+    const expertSelection=document.getElementById('expert-ai-selection');
+    const expertReview=document.getElementById('expert-review-ai');
     const expertApproval=document.querySelector('input[name="approve_expert_review"]');
+    const expertApprovalRow=document.getElementById('expert-review-approval');
+    const expertProviderRow=document.getElementById('expert-ai-provider');
+    const expertSummary=document.getElementById('expert-ai-summary');
+    const expertSettings=document.getElementById('expert-ai-settings-link');
+    const generateButton=document.getElementById('generate-button');
+    const selectedOption=(select)=>select&&select.options[select.selectedIndex];
+    const syncGenerateButton=()=>{{
+      const generationReady=(selectedOption(generationSelection)?.dataset.readiness||'')==='READY';
+      const expertReady=!expertReview?.checked||(selectedOption(expertSelection)?.dataset.readiness||'')==='READY';
+      if(generateButton) generateButton.disabled=!(generationReady&&expertReady);
+    }};
+    const syncExpertSelection=()=>{{
+      const option=selectedOption(expertSelection);
+      if(!option) return;
+      if(expertSummary) expertSummary.textContent={json.dumps(ui_text(locale, '本次审阅将使用：', 'This review uses: '))}+(option.dataset.summary||'')+' · '+(option.dataset.readiness||'');
+      if(expertSettings) expertSettings.href=option.dataset.settingsPath||expertSettings.href;
+      syncGenerateButton();
+    }};
+    const syncGenerationSelection=()=>{{
+      const option=selectedOption(generationSelection);
+      if(!option) return;
+      if(generationSummary) generationSummary.textContent=option.dataset.summary||'';
+      if(generationReadiness){{generationReadiness.textContent=option.dataset.readiness||'';generationReadiness.dataset.readiness=option.dataset.readiness||'';}}
+      if(generationSettings) generationSettings.href=option.dataset.settingsPath||generationSettings.href;
+      const generationExpert=expertSelection&&expertSelection.querySelector('option[value="generation"]');
+      if(generationExpert){{
+        generationExpert.dataset.provider=option.dataset.provider||'';
+        generationExpert.dataset.model=option.dataset.model||'';
+        generationExpert.dataset.summary=option.dataset.summary||'';
+        generationExpert.dataset.readiness=option.dataset.readiness||'';
+        generationExpert.dataset.settingsPath=option.dataset.settingsPath||'';
+        generationExpert.textContent={json.dumps(ui_text(locale, '使用生成模型：', 'Use generation model — '))}+(option.dataset.summary||'')+' — '+(option.dataset.readiness||'');
+      }}
+      syncExpertSelection();
+      syncGenerateButton();
+    }};
     const syncExpertApproval=()=>{{
       const selected=expertReview&&expertReview.checked;
       if(expertApproval) expertApproval.required=Boolean(selected);
+      [expertApprovalRow,expertProviderRow,expertSummary,expertSettings].forEach((item)=>{{if(item)item.hidden=!selected;}});
+      syncGenerateButton();
     }};
+    if(generationSelection) generationSelection.addEventListener('change',syncGenerationSelection);
+    if(expertSelection) expertSelection.addEventListener('change',syncExpertSelection);
     document.querySelectorAll('input[name="expert_review_mode"]').forEach((item)=>item.addEventListener('change',syncExpertApproval));
+    syncGenerationSelection();
+    syncExpertSelection();
     syncExpertApproval();
     document.querySelectorAll('input.file-native[type="file"]').forEach((input)=>{{
       const name=document.querySelector(`[data-file-name-for="${{input.name}}"]`);
@@ -5082,10 +6172,9 @@ def _user_page(
     }});
     if(resumeForm) resumeForm.addEventListener('submit',()=>{{
       const progress=document.getElementById('progress');
-      const button=document.getElementById('generate-button');
       if(progress) progress.classList.add('visible');
-      if(button) button.disabled=true;
-      if(button) button.textContent={json.dumps(ui_text(locale, '正在生成…', 'Generating…'))};
+      if(generateButton) generateButton.disabled=true;
+      if(generateButton) generateButton.textContent={json.dumps(ui_text(locale, '正在生成…', 'Generating…'))};
       window.setTimeout(()=>{{if(progress) progress.textContent={json.dumps(ui_text(locale, '任务正在后台运行，即将显示实时进度…', 'The job is running in the background. Live progress will appear shortly…'))};}},450);
     }});
     {poll_script}
@@ -6306,35 +7395,55 @@ def _ai_settings_page(
         hosted_gateway.descriptor.configuration_state
         is GatewayConfigurationState.CONFIGURED
     )
-    openai_ready = openai_api_key_is_configured()
+    openai_configured = openai_api_key_is_configured()
+    deepseek_configured = deepseek_api_key_is_configured()
+    openai_state = _credential_provider_state(
+        preference,
+        ModelProviderId.OPENAI_COMPATIBLE,
+        credential_configured=openai_configured,
+    )
+    deepseek_state = _credential_provider_state(
+        preference,
+        ModelProviderId.DEEPSEEK,
+        credential_configured=deepseek_configured,
+    )
+    openai_ready = openai_state == "ready"
+    deepseek_ready = deepseek_state == "ready"
     provider_names = {
         ModelProviderId.OLLAMA: ui_text(locale, "本地 AI", "Local AI"),
         ModelProviderId.SOLOSCALE_HOSTED: ui_text(
             locale, "SoloScale 托管 AI", "SoloScale Hosted AI"
         ),
         ModelProviderId.OPENAI_COMPATIBLE: "OpenAI API",
+        ModelProviderId.DEEPSEEK: "DeepSeek",
+    }
+    credential_status_labels = {
+        "not_configured": ui_text(locale, "未配置", "Not configured"),
+        "configured_not_tested": ui_text(
+            locale, "已配置，尚未验证", "Configured, not tested"
+        ),
+        "ready": "READY",
+        "failed": ui_text(locale, "验证失败", "Validation failed"),
     }
     status_map = {
         ModelProviderId.OLLAMA: (
-            ui_text(locale, "可用", "Ready")
+            "READY"
             if local_status.ready
             else ui_text(locale, "需要设置", "Setup needed")
         ),
         ModelProviderId.SOLOSCALE_HOSTED: (
-            ui_text(locale, "可用", "Available")
+            "READY"
             if hosted_ready
             else ui_text(locale, "当前不可用", "Unavailable")
         ),
-        ModelProviderId.OPENAI_COMPATIBLE: (
-            ui_text(locale, "已配置", "Configured")
-            if openai_ready
-            else ui_text(locale, "未配置", "Not configured")
-        ),
+        ModelProviderId.OPENAI_COMPATIBLE: credential_status_labels[openai_state],
+        ModelProviderId.DEEPSEEK: credential_status_labels[deepseek_state],
     }
     models = {
         ModelProviderId.OLLAMA: preference.ollama_model,
         ModelProviderId.SOLOSCALE_HOSTED: hosted_gateway.descriptor.model or "—",
         ModelProviderId.OPENAI_COMPATIBLE: preference.openai_model,
+        ModelProviderId.DEEPSEEK: preference.deepseek_model,
     }
     notice_html = (
         f'<p class="notice" role="status">{_escape(notice)}</p>' if notice else ""
@@ -6346,9 +7455,12 @@ def _ai_settings_page(
   <span class="service-state">{_escape(status_map[provider])} →</span>
 </a>"""
             for path, provider in (
-                ("local", ModelProviderId.OLLAMA),
-                ("hosted", ModelProviderId.SOLOSCALE_HOSTED),
-                ("openai", ModelProviderId.OPENAI_COMPATIBLE),
+                (
+                    model_provider_catalog_entry(entry.provider)
+                    .settings_path.rsplit("/", maxsplit=1)[-1],
+                    entry.provider,
+                )
+                for entry in MODEL_PROVIDER_CATALOG
             )
             if provider is not preference.provider
         )
@@ -6399,7 +7511,7 @@ def _ai_settings_page(
   <span class="kicker">{_escape(ui_text(locale, '当前 AI 服务', 'Current AI service'))}</span>
   <div><h2>{_escape(provider_names[preference.provider])}</h2><p>{_escape(models[preference.provider])}</p></div>
   <strong class="ready-dot">● {_escape(status_map[preference.provider])}</strong>
-  <a class="button-link" href="{ui_url('/settings/ai/' + {'ollama':'local','soloscale_hosted':'hosted','openai_compatible':'openai'}[preference.provider.value], locale)}">{_escape(ui_text(locale, '管理', 'Manage'))}</a>
+  <a class="button-link" href="{ui_url(model_provider_catalog_entry(preference.provider).settings_path, locale)}">{_escape(ui_text(locale, '管理', 'Manage'))}</a>
 </section>
 <section class="other-services"><span class="kicker">{_escape(ui_text(locale, '其他选择', 'Other options'))}</span>{other_cards}</section>
 <section class="connected-services"><span class="kicker">{_escape(ui_text(locale, '创作与发布服务', 'Creation and publishing services'))}</span>
@@ -6454,21 +7566,18 @@ def _ai_settings_page(
         save_disabled = "" if desktop_mode else " disabled"
         delete_button = (
             f'<button id="delete-openai-key" class="danger" type="button">{_escape(ui_text(locale, "移除 Keychain 密钥", "Remove Keychain key"))}</button>'
-            if openai_ready and desktop_mode
+            if openai_configured and desktop_mode
             else ""
         )
-        use_default_button = (
-            f'<button class="secondary" name="action" value="use_default" type="submit">{_escape(ui_text(locale, "设为默认", "Use as default"))}</button>'
-            if openai_ready
-            else ""
-        )
+        use_default_disabled = "" if openai_ready else " disabled"
         body = f"""<a class="back-link" href="{ui_url('/settings/ai', locale)}">← {_escape(ui_text(locale, 'AI 服务', 'AI Service'))}</a>{notice_html}{unavailable}
 <section class="setup-card"><span class="kicker">OpenAI API</span><h2>{_escape(status_map[ModelProviderId.OPENAI_COMPATIBLE])}</h2><p>{_escape(desktop_note)}</p>
 <form id="openai-setup"><input type="hidden" id="openai-locale" value="{locale}" />
 <label>API Key<input id="openai-api-key" type="password" maxlength="512" autocomplete="new-password" value="" placeholder="sk-…"{save_disabled} /></label>
-<label>{_escape(ui_text(locale, '模型', 'Model'))}<input id="openai-model" maxlength="120" value="{_escape(preference.openai_model)}" /></label>
-<div class="button-row"><button id="save-openai-key" type="submit"{save_disabled}>{_escape(ui_text(locale, '保存并使用 OpenAI', 'Save & use OpenAI'))}</button>{delete_button}</div></form>
-<form method="post" action="/settings/ai/openai"><input type="hidden" name="ui_locale" value="{locale}" /><input type="hidden" name="openai_model" value="{_escape(preference.openai_model)}" /><div class="button-row"><button class="secondary" name="action" value="test" type="submit" {'disabled' if not openai_ready else ''}>{_escape(ui_text(locale, '测试连接', 'Test connection'))}</button>{use_default_button}</div></form>
+<div class="button-row"><button id="save-openai-key" type="submit"{save_disabled}>{_escape(ui_text(locale, '安全保存密钥与设置', 'Save key & settings securely'))}</button>{delete_button}</div></form>
+<form method="post" action="/settings/ai/openai"><input type="hidden" name="ui_locale" value="{locale}" />
+<label>{_escape(ui_text(locale, '模型', 'Model'))}<input id="openai-model" name="openai_model" maxlength="120" value="{_escape(preference.openai_model)}" /></label>
+<div class="button-row"><button name="action" value="save" type="submit">{_escape(ui_text(locale, '保存模型', 'Save model'))}</button><button class="secondary" name="action" value="test" type="submit" {'disabled' if not openai_configured else ''}>{_escape(ui_text(locale, '验证连接', 'Validate'))}</button><button class="secondary" name="action" value="use_default" type="submit"{use_default_disabled}>{_escape(ui_text(locale, '设为默认', 'Set default'))}</button></div></form>
 <p id="openai-setup-status" role="status"></p></section>"""
         current_url = "/settings/ai/openai"
         script = f"""
@@ -6484,10 +7593,69 @@ if(setup) setup.addEventListener('submit',async(event)=>{{
   const response=await fetch('/settings/ai/openai',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{ui_locale:document.getElementById('openai-locale').value,action:'prepare',openai_model:model.value}})}});
   if(!response.ok){{status.textContent={json.dumps(ui_text(locale, '模型设置无法保存。', 'The model setting could not be saved.'))};return;}}
   const secret=key.value; key.value='';
-  bridge.postMessage({{action:'saveOpenAIKey',apiKey:secret,returnPath:{json.dumps(ui_url('/settings/ai/openai', locale, provider='saved'))}}});
+  bridge.postMessage({{action:'saveOpenAIKey',apiKey:secret,returnPath:{json.dumps(ui_url('/settings/ai/openai', locale, provider='openai-key-saved'))}}});
 }});
 const remove=document.getElementById('delete-openai-key');
-if(remove) remove.addEventListener('click',()=>window.webkit.messageHandlers.soloscaleCredentials.postMessage({{action:'deleteOpenAIKey',returnPath:{json.dumps(ui_url('/settings/ai/openai', locale, provider='removed'))}}}));
+if(remove) remove.addEventListener('click',()=>window.webkit.messageHandlers.soloscaleCredentials.postMessage({{action:'deleteOpenAIKey',returnPath:{json.dumps(ui_url('/settings/ai/openai', locale, provider='openai-key-removed'))}}}));
+"""
+    elif detail == "deepseek":
+        model_labels = {
+            "deepseek-v4-flash": "DeepSeek V4 Flash",
+            "deepseek-v4-pro": "DeepSeek V4 Pro",
+        }
+        model_options = "".join(
+            f'<option value="{model}" {"selected" if model == preference.deepseek_model else ""}>{label}</option>'
+            for model, label in model_labels.items()
+        )
+        reasoning_labels = {
+            "none": ui_text(locale, "关闭", "None"),
+            "low": ui_text(locale, "低", "Low"),
+            "high": ui_text(locale, "高", "High"),
+            "max": ui_text(locale, "最高", "Max"),
+        }
+        reasoning_options = "".join(
+            f'<option value="{effort}" {"selected" if effort == preference.deepseek_reasoning_effort else ""}>{_escape(label)}</option>'
+            for effort, label in reasoning_labels.items()
+        )
+        unavailable = "" if desktop_mode else f'<p class="notice warning">{_escape(ui_text(locale, "请在 SoloScale Desktop App 中配置 DeepSeek；普通浏览器不会接收密钥。", "Configure DeepSeek in the SoloScale Desktop App. A normal browser never accepts the key."))}</p>'
+        save_disabled = "" if desktop_mode else " disabled"
+        delete_button = (
+            f'<button id="delete-deepseek-key" class="danger" type="button">{_escape(ui_text(locale, "移除 Keychain 密钥", "Remove Keychain key"))}</button>'
+            if deepseek_configured and desktop_mode
+            else ""
+        )
+        use_default_disabled = "" if deepseek_ready else " disabled"
+        body = f"""<a class="back-link" href="{ui_url('/settings/ai', locale)}">← {_escape(ui_text(locale, 'AI 服务', 'AI Service'))}</a>{notice_html}{unavailable}
+<section class="setup-card" data-provider-status="{deepseek_state}"><span class="kicker">DeepSeek</span><h2>{_escape(status_map[ModelProviderId.DEEPSEEK])}</h2>
+<p>{_escape(ui_text(locale, 'API key 只保存在 macOS Keychain。Reasoning 直接映射到 Responses API 的 reasoning.effort。', 'The API key stays in macOS Keychain. Reasoning maps directly to the Responses API reasoning.effort field.'))}</p>
+<form id="deepseek-key-setup"><input type="hidden" id="deepseek-locale" value="{locale}" />
+<label>API Key<input id="deepseek-api-key" type="password" maxlength="512" autocomplete="new-password" value="" placeholder="DeepSeek API key"{save_disabled} /></label>
+<div class="button-row"><button id="save-deepseek-key" type="submit"{save_disabled}>{_escape(ui_text(locale, '安全保存密钥与设置', 'Save key & settings securely'))}</button>{delete_button}</div></form>
+<form id="deepseek-settings" method="post" action="/settings/ai/deepseek"><input type="hidden" name="ui_locale" value="{locale}" />
+<label>{_escape(ui_text(locale, '模型', 'Model'))}<select id="deepseek-model" name="deepseek_model">{model_options}</select></label>
+<label>Reasoning<select id="deepseek-reasoning" name="deepseek_reasoning_effort">{reasoning_options}</select></label>
+<div class="button-row"><button name="action" value="save" type="submit">{_escape(ui_text(locale, '保存设置', 'Save settings'))}</button><button class="secondary" name="action" value="test" type="submit" {'disabled' if not deepseek_configured else ''}>{_escape(ui_text(locale, '验证连接', 'Validate'))}</button><button class="secondary" name="action" value="use_default" type="submit"{use_default_disabled}>{_escape(ui_text(locale, '设为默认', 'Set default'))}</button></div></form>
+<details><summary>{_escape(ui_text(locale, '连接详情', 'Connection details'))}</summary><p><code>provider_id=deepseek · transport=responses · {_escape(DEEPSEEK_BASE_URL)}</code></p></details>
+<p id="deepseek-setup-status" role="status"></p></section>"""
+        current_url = "/settings/ai/deepseek"
+        script = f"""
+const deepseekSetup=document.getElementById('deepseek-key-setup');
+if(deepseekSetup) deepseekSetup.addEventListener('submit',async(event)=>{{
+  event.preventDefault();
+  const status=document.getElementById('deepseek-setup-status');
+  const key=document.getElementById('deepseek-api-key');
+  const model=document.getElementById('deepseek-model');
+  const reasoning=document.getElementById('deepseek-reasoning');
+  const bridge=window.webkit?.messageHandlers?.soloscaleCredentials;
+  if(!bridge){{status.textContent={json.dumps(ui_text(locale, '请在 Desktop App 中完成设置。', 'Complete setup in the Desktop App.'))};return;}}
+  if(!key.value.trim()){{status.textContent={json.dumps(ui_text(locale, '请输入 API key。', 'Enter an API key.'))};return;}}
+  const response=await fetch('/settings/ai/deepseek',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{ui_locale:document.getElementById('deepseek-locale').value,action:'prepare',deepseek_model:model.value,deepseek_reasoning_effort:reasoning.value}})}});
+  if(!response.ok){{status.textContent={json.dumps(ui_text(locale, 'DeepSeek 设置无法保存。', 'The DeepSeek settings could not be saved.'))};return;}}
+  const secret=key.value; key.value='';
+  bridge.postMessage({{action:'saveDeepSeekKey',apiKey:secret,returnPath:{json.dumps(ui_url('/settings/ai/deepseek', locale, provider='deepseek-key-saved'))}}});
+}});
+const removeDeepSeek=document.getElementById('delete-deepseek-key');
+if(removeDeepSeek) removeDeepSeek.addEventListener('click',()=>window.webkit.messageHandlers.soloscaleCredentials.postMessage({{action:'deleteDeepSeekKey',returnPath:{json.dumps(ui_url('/settings/ai/deepseek', locale, provider='deepseek-key-removed'))}}}));
 """
     else:
         raise ValueError("unknown AI settings detail")
@@ -6497,8 +7665,8 @@ if(remove) remove.addEventListener('click',()=>window.webkit.messageHandlers.sol
         current_url=current_url,
         title=f"SoloScale · {ui_text(locale, 'AI 服务', 'AI Service')}",
         eyebrow=ui_text(locale, "设置", "Settings"),
-        heading=ui_text(locale, "选择一次，所有工作流自动使用。", "Choose once. Every workflow follows."),
-        description=ui_text(locale, "简历与内容共享同一个默认 AI 服务；高级设置只在这里出现。", "Resume and Content share one default AI service. Advanced setup stays here."),
+        heading=ui_text(locale, "选择一次，三个 AI 工作流自动使用。", "Choose once. Three AI workflows follow."),
+        description=ui_text(locale, "Resume、Creator 与 Content 共享同一个默认 AI 服务；Learning 保持确定性运行。", "Resume, Creator, and Content share one default AI service. Learning remains deterministic."),
         body=body,
         script=script,
         extra_css="""
@@ -6506,6 +7674,158 @@ if(remove) remove.addEventListener('click',()=>window.webkit.messageHandlers.sol
 .integration-link{text-decoration:none;color:inherit}
 @media(max-width:700px){.current-service,.connected-grid{grid-template-columns:1fr}.current-service .ready-dot,.current-service .button-link{grid-column:1;justify-self:start}.service-card,.integration-card{align-items:flex-start;flex-direction:column}}
 """,
+    )
+
+
+def _resume_intelligence_page(
+    locale: UILocale,
+    data_root: Path,
+    *,
+    job_description: str = "",
+    state: ResumeIntelligencePreflightState | None = None,
+    notice: str | None = None,
+    ai_choice_id: str = "default",
+    include_private_conversations: bool = False,
+    include_buildlog_history: bool = False,
+) -> str:
+    """Resume Intelligence preflight; never performs a model call or export."""
+
+    notice_html = (
+        f'<p class="notice" role="status">{_escape(notice)}</p>' if notice else ""
+    )
+    if state is None:
+        selections = _resume_ai_selections(data_root)
+        selected_ai = next(
+            (
+                selection
+                for selection in selections
+                if selection.choice_id == ai_choice_id
+            ),
+            selections[0],
+        )
+        ai_options = "".join(
+            _resume_ai_option(
+                selection,
+                locale,
+                selected=selection.choice_id == selected_ai.choice_id,
+                prefix=(
+                    ui_text(locale, "使用默认：", "Use global default — ")
+                    if selection.choice_id == "default"
+                    else ""
+                ),
+            )
+            for selection in selections
+        )
+        private_conversations_checked = (
+            " checked" if include_private_conversations else ""
+        )
+        buildlog_checked = " checked" if include_buildlog_history else ""
+        body = f"""{notice_html}
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '新版简历智能', 'Resume Intelligence'))}</span>
+<h2>{_escape(ui_text(locale, '分析岗位 → 检索证据 → 分级真实性 → 生成预检', 'Analyze role → retrieve evidence → grade claims → generation preflight'))}</h2>
+<p>{_escape(ui_text(locale, '此页面只做证据分析预检；现有简历生成与导出流程保持不变。', 'This page performs evidence-analysis preflight only; the existing resume generation and export flow remains unchanged.'))}</p>
+<form method="post" action="/resume/intelligence"><input type="hidden" name="ui_locale" value="{locale}" />
+<label>{_escape(ui_text(locale, '本次 AI 服务', 'AI service for this run'))}<select name="resume_ai_selection">{ai_options}</select><span class="hint">{_escape(ui_text(locale, '本次选择不会更改全局默认。', 'This run selection does not change the global default.'))}</span></label>
+<label>{_escape(ui_text(locale, 'Job Description', 'Job Description'))}<textarea name="job_description" rows="16" maxlength="131072" required>{_escape(job_description)}</textarea></label>
+<label>{_escape(ui_text(locale, 'Resume Library 根目录（可选）', 'Resume Library root (optional)'))}<input name="resume_library_root" value="" /></label>
+<label>{_escape(ui_text(locale, '项目归属标记（可选，逗号分隔）', 'Project ownership markers (optional, comma separated)'))}<input name="project_markers" placeholder="solo-scale, ai-research-assistant" /></label>
+<fieldset><legend>{_escape(ui_text(locale, '本地私有历史（默认不使用）', 'Private local history (not used by default)'))}</legend>
+<label><input type="checkbox" name="include_private_conversations" value="1"{private_conversations_checked} /> {_escape(ui_text(locale, '允许本次检索 Codex / ChatGPT 历史', 'Allow Codex / ChatGPT history for this run'))}</label>
+<label><input type="checkbox" name="include_buildlog_history" value="1"{buildlog_checked} /> {_escape(ui_text(locale, '允许本次检索 BuildLog 历史', 'Allow BuildLog history for this run'))}</label>
+<span class="hint">{_escape(ui_text(locale, '两个选项只对本次预检有效；不会更改全局设置。', 'These choices apply only to this preflight and do not change global settings.'))}</span></fieldset>
+<button type="submit">{_escape(ui_text(locale, '分析并生成预检', 'Analyze and build preflight'))}</button></form></section>
+<p><a class="button-link" href="{ui_url('/resume', locale)}">{_escape(ui_text(locale, '返回现有简历生成与导出', 'Return to existing resume generation and export'))}</a></p>"""
+        return render_app_shell(
+            active="resume",
+            locale=locale,
+            current_url="/resume/intelligence",
+            title=f"SoloScale · {ui_text(locale, '简历智能', 'Resume Intelligence')}",
+            eyebrow=ui_text(locale, "简历", "Resume"),
+            heading=ui_text(locale, "证据 → 分级真实性 → 最强真实简历", "Evidence → graded truth → strongest truthful resume"),
+            description=ui_text(locale, "先完整预检，再决定是否授权一次真实生成。", "Complete the preflight before authorizing one real generation."),
+            body=body,
+            extra_css=".setup-card{max-width:780px;padding:24px;border:1px solid var(--border);border-radius:20px;background:var(--surface-subtle)}.setup-card form{display:grid;gap:14px}",
+        )
+
+    claim_truth = state.claim_truth
+    selected_label = _resume_ai_selection_label(state.ai_selection, locale)
+    steps = [
+        (ui_text(locale, "分析 JD", "Analyzing JD"), True,
+         f"{len(state.coverage_map.requirements)} requirements"),
+        (ui_text(locale, "搜索证据", "Searching evidence"), True,
+         f"{len(state.coverage_map.candidates)} candidates"),
+        (ui_text(locale, "构建 claim map", "Building claim map"), True,
+         f"{claim_truth.verified_count} verified / {claim_truth.supported_derivation_count} derivation"),
+        (ui_text(locale, "生成角色策略", "Building role strategy"), True,
+         state.strategy.headline),
+        (ui_text(locale, "生成简历", "Generating Resume"), False,
+         ui_text(locale, f"等待明确授权：{selected_label}", f"Awaiting explicit authorization: {selected_label}")),
+        (ui_text(locale, "确定性验证", "Validating"), False,
+         ui_text(locale, "生成后执行", "After generation")),
+    ]
+    steps_html = "".join(
+        f'<li class="{"pass" if done else "pending"}">{"✓" if done else "○"} '
+        f"{_escape(label)} — {_escape(detail)}</li>"
+        for label, done, detail in steps
+    )
+    coverage = state.coverage
+    source_status_html = "".join(
+        f"<li><code>{_escape(source.source_kind.value)}</code> — "
+        f"{_escape(source.state)}"
+        f"{f' · {_escape(source.detail)}' if source.detail else ''}</li>"
+        for source in state.coverage_map.sources
+    )
+    coverage_line = (
+        f"{coverage.requirements_total}/{coverage.requirements_total} · "
+        f"STRONG {len(coverage.strongly_represented)} · "
+        f"PARTIAL {len(coverage.partially_represented)} · "
+        f"AVAILABLE {len(coverage.available_not_selected)} · "
+        f"GAP {len(coverage.high_value_gaps)} · "
+        f"UNSUPPORTED {len(coverage.unsupported)}"
+    )
+    preflight = state.preflight
+    application_html = "".join(
+        f"<li>{_escape(claim.proposed_text)}</li>" for claim in state.claims
+    ) or f"<li>{_escape(ui_text(locale, '暂无可写入的声明', 'No allowed claims yet'))}</li>"
+    target_html = "".join(
+        (
+            f'<li><strong>{_escape(gap.claim_class.value)}</strong> — '
+            f"{_escape(gap.suggested_wording)}<br>"
+            f"<small>{_escape(', '.join(gap.missing_proof[:4]))} · "
+            f"{_escape(' / '.join(action.value for action in gap.actions))}</small></li>"
+        )
+        for gap in claim_truth.target_gaps[:12]
+    ) or f"<li>{_escape(ui_text(locale, '没有待验证缺口', 'No open gaps'))}</li>"
+    body = f"""{notice_html}
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '阶段', 'Progress'))}</span>
+<ul class="readiness-list">{steps_html}</ul>
+<p class="service-state">{_escape(ui_text(locale, '耗时', 'Elapsed'))} {state.total_seconds:.1f}s · catalog {state.stage_timings.get('catalog', 0):.2f}s · retrieval {state.stage_timings.get('retrieval', 0):.2f}s · claim map {state.stage_timings.get('claim_map', 0):.2f}s</p></section>
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '生成预检', 'Generation preflight'))}</span>
+<p>provider={_escape(preflight.provider)} · model={_escape(preflight.model)} · reasoning={_escape(preflight.reasoning_effort)} · credential={_escape(preflight.credential_status)} · intended_calls={preflight.intended_calls} · automatic_retries={preflight.automatic_retries}</p>
+<p><strong>{_escape(state.ai_selection.readiness)}</strong> — {_escape(selected_label)}</p>
+<p>{_escape(ui_text(locale, '尚未发起任何付费调用；需要明确人工授权。', 'No paid call has been made; explicit human authorization is required.'))}</p></section>
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '覆盖', 'Coverage'))}</span><p>{_escape(coverage_line)}</p>
+<p>{_escape(ui_text(locale, '选中项目', 'Selected projects'))}: {_escape(', '.join(state.strategy.selected_projects) or '—')}</p>
+<p>{_escape(ui_text(locale, '排除表述', 'Excluded terms'))}: {_escape(', '.join(preflight.excluded_terms[:8]) or '—')}</p>
+<p><strong>{_escape(ui_text(locale, '证据来源状态', 'Evidence source status'))}</strong></p><ul>{source_status_html}</ul></section>
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '允许声明候选（仅预检）', 'Allowed claim candidates (preflight only)'))}</span>
+<ul>{application_html}</ul><p class="service-state">{_escape(ui_text(locale, '这些候选尚未生成文件，不能视为可提交简历。', 'These candidates have not generated a file and are not a submit-ready resume.'))}</p></section>
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, 'TARGET / BENCHMARK（含缺口）', 'TARGET / BENCHMARK (contains gaps)'))}</span>
+<ul>{target_html}</ul><p class="service-state">{_escape(ui_text(locale, '目标简历包含未验证缺口，不可作为可提交版本。', 'The Target Resume contains unverified gaps and is not submit-ready.'))}</p></section>
+<section class="setup-card"><span class="kicker">{_escape(ui_text(locale, '确定性计划草稿', 'Deterministic planned draft'))}</span>
+<p>{_escape(ui_text(locale, '以下只是授权声明的确定性排版，不是最终生成结果。', 'This is only a deterministic arrangement of authorized claims, not the final generated resume.'))}</p>
+<pre>{_escape(state.planned_render)}</pre></section>
+<p><a class="button-link" href="{ui_url('/resume', locale)}">{_escape(ui_text(locale, '返回现有简历生成与导出', 'Return to existing resume generation and export'))}</a></p>"""
+    return render_app_shell(
+        active="resume",
+        locale=locale,
+        current_url="/resume/intelligence",
+        title=f"SoloScale · {ui_text(locale, '简历智能', 'Resume Intelligence')}",
+        eyebrow=ui_text(locale, "简历", "Resume"),
+        heading=state.strategy.headline,
+        description=ui_text(locale, "真实生成前预检完成。", "Generation preflight complete."),
+        body=body,
+        extra_css=".setup-card{max-width:880px;margin-top:16px;padding:24px;border:1px solid var(--border);border-radius:20px;background:var(--surface-subtle)}.readiness-list{list-style:none;padding:0;display:grid;gap:8px}.readiness-list .pass{color:var(--success)}.readiness-list .pending{color:var(--warning)}.setup-card ul{display:grid;gap:6px;padding-left:18px}.setup-card pre{white-space:pre-wrap;background:var(--surface);padding:12px;border-radius:12px;overflow:auto}",
     )
 
 
@@ -6651,6 +7971,7 @@ def _page(
     form: dict[str, str],
     locale: UILocale = DEFAULT_UI_LOCALE,
     provider_notice: str | None = None,
+    build_identity: DesktopBuildIdentity | None = None,
 ) -> str:
     query = _escape(form.get("query", ""))
     source_kind = form.get("source_kind", "")
@@ -6661,7 +7982,9 @@ def _page(
         ),
         ModelProviderId.OLLAMA: ui_text(locale, "本地 AI", "Local AI"),
         ModelProviderId.OPENAI_COMPATIBLE: "OpenAI API",
+        ModelProviderId.DEEPSEEK: "DeepSeek",
     }[ai_preference.provider]
+    identity = build_identity or _desktop_build_identity()
     result_section = (
         f'<section class="card full result-wrap"><h2>{_escape(ui_text(locale, "最近一次运行", "Latest run"))}</h2>{_result_card(action_result, locale)}</section>'
         if action_result is not None
@@ -6724,6 +8047,20 @@ def _page(
       <h2>{_escape(ui_text(locale, '当前 AI 服务（只读诊断）', 'Current AI service (read-only diagnostic)'))}</h2>
       <p class="tool-description">{_escape(ui_text(locale, '显示当前默认服务与模型。连接、模型和密钥设置集中在独立页面。', 'Shows the current default service and model. Connection, model, and credential setup live on a dedicated page.'))}</p>
       <div class="provider-option"><span><strong>{_escape(ai_provider_name)}</strong><small>{_escape(ai_preference.model)}</small></span></div>
+    </section>
+
+    <section class="card full tool-card build-identity" data-build-kind="{_escape(identity.build_kind)}">
+      <span class="kicker">{_escape(ui_text(locale, '构建信息', 'Build identity'))}</span>
+      <h2>{_escape(identity.display_name)}</h2>
+      <p class="tool-description">{_escape(identity.app_version)} ({_escape(ui_text(locale, '构建', 'build'))} {_escape(identity.build_number)})</p>
+      <div class="provider-option"><span><strong>{_escape(ui_text(locale, '分支', 'Branch'))}</strong><small><code>{_escape(identity.git_branch)}</code></small></span></div>
+      <div class="provider-option"><span><strong>{_escape(ui_text(locale, '提交', 'Commit'))}</strong><small><code>{_escape(identity.git_commit)}</code></small></span></div>
+      <div class="provider-option"><span><strong>{_escape(ui_text(locale, '源码状态', 'Source status'))}</strong><small><code>{_escape(ui_text(locale, '干净且已提交', 'clean and committed') if identity.git_dirty == 'false' else identity.git_dirty)}</code></small></span></div>
+      <details class="technical-details"><summary>{_escape(ui_text(locale, '高级构建诊断', 'Advanced build diagnostics'))}</summary>
+        <p>{_escape(ui_text(locale, '元数据来源', 'Metadata source'))}: <code>{_escape(ui_text(locale, '构建时写入 App bundle', 'embedded in the app bundle at build time'))}</code></p>
+        <p>{_escape(ui_text(locale, 'Bundle 标识', 'Bundle identifier'))}: <code>{_escape(identity.bundle_id)}</code></p>
+        <p>{_escape(ui_text(locale, 'Bundle 路径', 'Bundle path'))}: <code>{_escape(identity.bundle_path)}</code></p>
+      </details>
     </section>
 
     <aside class="notice full">{_escape(ui_text(locale, '简历生成在“找到机会”页面。这里的证据结果只用于核对，不会自动写进简历。', 'Resume generation lives on the Get the job page. Evidence results here are for verification and are never inserted into a resume automatically.'))}</aside>
@@ -7024,18 +8361,43 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
         notices = {
             "saved": ui_text(
                 self.ui_locale,
-                "已保存为默认 AI 服务。简历和内容会自动使用它。",
-                "Saved as the default AI service. Resume and Content now use it automatically.",
+                "已保存为默认 AI 服务。Resume、Creator 和 Content 会自动使用它。",
+                "Saved as the default AI service. Resume, Creator, and Content now use it automatically.",
             ),
             "prepared": ui_text(
                 self.ui_locale,
                 "模型设置已保存，正在交给 macOS 安全保存密钥。",
                 "Model settings are saved. macOS is now storing the key securely.",
             ),
+            "openai-key-saved": ui_text(
+                self.ui_locale,
+                "OpenAI 密钥已安全保存；请验证连接后再设为默认。",
+                "The OpenAI key is saved securely. Validate the connection before setting it as default.",
+            ),
+            "deepseek-key-saved": ui_text(
+                self.ui_locale,
+                "DeepSeek 密钥已安全保存；请验证连接后再设为默认。",
+                "The DeepSeek key is saved securely. Validate the connection before setting it as default.",
+            ),
+            "settings-saved": ui_text(
+                self.ui_locale,
+                "模型设置已保存；配置变化后需要重新验证。",
+                "Model settings are saved. Changed configurations must be validated again.",
+            ),
             "removed": ui_text(
                 self.ui_locale,
                 "OpenAI API key 已从 macOS Keychain 移除。",
                 "The OpenAI API key was removed from macOS Keychain.",
+            ),
+            "openai-key-removed": ui_text(
+                self.ui_locale,
+                "OpenAI API key 已从 macOS Keychain 移除。",
+                "The OpenAI API key was removed from macOS Keychain.",
+            ),
+            "deepseek-key-removed": ui_text(
+                self.ui_locale,
+                "DeepSeek API key 已从 macOS Keychain 移除。",
+                "The DeepSeek API key was removed from macOS Keychain.",
             ),
             "ready": ui_text(
                 self.ui_locale,
@@ -7074,13 +8436,13 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             ),
             "unauthorized": ui_text(
                 self.ui_locale,
-                "OpenAI 拒绝了这个密钥；请更换后重试。",
-                "OpenAI rejected this key. Replace it and try again.",
+                "AI 服务拒绝了这个密钥；请更换后重试。",
+                "The AI service rejected this key. Replace it and try again.",
             ),
             "model-unavailable": ui_text(
                 self.ui_locale,
-                "这个 OpenAI 模型对当前项目不可用。",
-                "This OpenAI model is not available to the current project.",
+                "所选模型对当前凭据不可用。",
+                "The selected model is not available to the current credential.",
             ),
             "test-failed": ui_text(
                 self.ui_locale,
@@ -7638,6 +9000,18 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
         if resume_job_match is not None:
             self._send_resume_job_page(resume_job_match.group(1))
             return
+        if path == "/resume/intelligence":
+            page = _resume_intelligence_page(
+                self.ui_locale, self.ui_data_root.absolute()
+            )
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/resume":
             _apply_ai_provider_preference(
                 self.latest_user_form, self.ui_data_root.absolute()
@@ -7653,6 +9027,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             "/settings/ai/local": "local",
             "/settings/ai/openai": "openai",
             "/settings/ai/hosted": "hosted",
+            "/settings/ai/deepseek": "deepseek",
         }
         if path in ai_settings_detail:
             self._send_ai_settings_page(
@@ -8077,6 +9452,73 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
         if not self._desktop_session_allowed():
             return
         resume_post_started = time.perf_counter() if path == "/generate" else None
+        if path == "/resume/intelligence":
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                length = -1
+            if length < 0 or length > 256 * 1024:
+                self.send_error(413, "Resume Intelligence request is too large")
+                return
+            form = _parse_form(self.rfile.read(length)) if length else {}
+            self._adopt_ui_locale(form)
+            job_description = form.get("job_description", "").strip()
+            library_value = form.get("resume_library_root", "").strip()
+            markers = tuple(
+                marker.strip()
+                for marker in form.get("project_markers", "").split(",")
+                if marker.strip()
+            )
+            ai_choice_id = form.get("resume_ai_selection", "default")
+            include_private_conversations = (
+                form.get("include_private_conversations") == "1"
+            )
+            include_buildlog_history = form.get("include_buildlog_history") == "1"
+            knowledge_source_kinds = tuple(
+                kind
+                for enabled, kinds in (
+                    (
+                        include_private_conversations,
+                        (SourceKind.CODEX_SESSION, SourceKind.CHATGPT_EXPORT),
+                    ),
+                    (include_buildlog_history, (SourceKind.BUILDLOG_RUN,)),
+                )
+                if enabled
+                for kind in kinds
+            )
+            try:
+                resume_preflight_state = _run_resume_intelligence_preflight(
+                    self.ui_data_root.absolute(),
+                    job_description,
+                    resume_library_root=Path(library_value) if library_value else None,
+                    owned_project_markers=markers,
+                    ai_choice_id=ai_choice_id,
+                    knowledge_source_kinds=knowledge_source_kinds,
+                )
+            except (OSError, ValueError):
+                resume_preflight_state = None
+            page = _resume_intelligence_page(
+                self.ui_locale,
+                self.ui_data_root.absolute(),
+                job_description=job_description,
+                state=resume_preflight_state,
+                ai_choice_id=ai_choice_id,
+                include_private_conversations=include_private_conversations,
+                include_buildlog_history=include_buildlog_history,
+                notice=None if resume_preflight_state is not None else ui_text(
+                    self.ui_locale,
+                    "预检未能完成；请检查 JD 与本地数据。",
+                    "The preflight could not complete. Check the JD and local data.",
+                ),
+            )
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/creator/accounts/youtube/connect":
             try:
                 length = int(self.headers.get("Content-Length", "0") or 0)
@@ -8366,7 +9808,11 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 return
             form = _parse_form(self.rfile.read(length))
             self._adopt_ui_locale(form)
-            if "api_key" in form or "openai_api_key" in form:
+            if (
+                "api_key" in form
+                or "openai_api_key" in form
+                or "deepseek_api_key" in form
+            ):
                 self.send_error(400, "Credentials are not accepted by this endpoint")
                 return
             self.send_response(303)
@@ -8470,6 +9916,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             "/settings/ai/local",
             "/settings/ai/openai",
             "/settings/ai/hosted",
+            "/settings/ai/deepseek",
         }:
             try:
                 length = int(self.headers.get("Content-Length", "0") or 0)
@@ -8552,7 +9999,7 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                         outcome = "saved"
                     elif action == "use_default":
                         outcome = "unavailable"
-                else:
+                elif path == "/settings/ai/openai":
                     if action == "prepare":
                         if self.desktop_session_token is None:
                             outcome = "unavailable"
@@ -8563,8 +10010,20 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                                 openai_model=form.get(
                                     "openai_model", _OPENAI_DEFAULT_MODEL
                                 ),
+                                set_default=False,
+                                invalidate_validation=True,
                             )
                             outcome = "prepared"
+                    elif action == "save":
+                        _save_ai_provider_preference(
+                            data_root,
+                            provider=ModelProviderId.OPENAI_COMPATIBLE.value,
+                            openai_model=form.get(
+                                "openai_model", _OPENAI_DEFAULT_MODEL
+                            ),
+                            set_default=False,
+                        )
+                        outcome = "settings-saved"
                     elif action == "test":
                         preference = _save_ai_provider_preference(
                             data_root,
@@ -8575,18 +10034,124 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                             set_default=False,
                         )
                         outcome = _openai_connection_status(preference)
+                        if outcome in {
+                            "ready",
+                            "unauthorized",
+                            "model-unavailable",
+                            "test-failed",
+                        }:
+                            _record_ai_provider_validation(
+                                data_root,
+                                provider=ModelProviderId.OPENAI_COMPATIBLE,
+                                status="ready" if outcome == "ready" else "failed",
+                                detail=outcome,
+                            )
                     elif action == "use_default":
-                        if openai_api_key_is_configured():
+                        preference = _save_ai_provider_preference(
+                            data_root,
+                            provider=ModelProviderId.OPENAI_COMPATIBLE.value,
+                            openai_model=form.get(
+                                "openai_model", _OPENAI_DEFAULT_MODEL
+                            ),
+                            set_default=False,
+                        )
+                        if (
+                            _credential_provider_state(
+                                preference,
+                                ModelProviderId.OPENAI_COMPATIBLE,
+                                credential_configured=openai_api_key_is_configured(),
+                            )
+                            == "ready"
+                        ):
                             _save_ai_provider_preference(
                                 data_root,
                                 provider=ModelProviderId.OPENAI_COMPATIBLE.value,
-                                openai_model=form.get(
-                                    "openai_model", _OPENAI_DEFAULT_MODEL
+                                openai_model=preference.openai_model,
+                            )
+                            outcome = "saved"
+                        else:
+                            outcome = (
+                                "not-configured"
+                                if not openai_api_key_is_configured()
+                                else "not-ready"
+                            )
+                else:
+                    model = form.get("deepseek_model", DEEPSEEK_MODEL_IDS[0])
+                    reasoning = form.get("deepseek_reasoning_effort", "low")
+                    if action == "prepare":
+                        if self.desktop_session_token is None:
+                            outcome = "unavailable"
+                        else:
+                            _save_ai_provider_preference(
+                                data_root,
+                                provider=ModelProviderId.DEEPSEEK.value,
+                                deepseek_model=model,
+                                deepseek_reasoning_effort=reasoning,
+                                set_default=False,
+                                invalidate_validation=True,
+                            )
+                            outcome = "prepared"
+                    elif action == "save":
+                        _save_ai_provider_preference(
+                            data_root,
+                            provider=ModelProviderId.DEEPSEEK.value,
+                            deepseek_model=model,
+                            deepseek_reasoning_effort=reasoning,
+                            set_default=False,
+                        )
+                        outcome = "settings-saved"
+                    elif action == "test":
+                        preference = _save_ai_provider_preference(
+                            data_root,
+                            provider=ModelProviderId.DEEPSEEK.value,
+                            deepseek_model=model,
+                            deepseek_reasoning_effort=reasoning,
+                            set_default=False,
+                        )
+                        outcome = _deepseek_connection_status(preference)
+                        if outcome in {
+                            "ready",
+                            "unauthorized",
+                            "model-unavailable",
+                            "test-failed",
+                        }:
+                            _record_ai_provider_validation(
+                                data_root,
+                                provider=ModelProviderId.DEEPSEEK,
+                                status="ready" if outcome == "ready" else "failed",
+                                detail=outcome,
+                            )
+                    elif action == "use_default":
+                        preference = _save_ai_provider_preference(
+                            data_root,
+                            provider=ModelProviderId.DEEPSEEK.value,
+                            deepseek_model=model,
+                            deepseek_reasoning_effort=reasoning,
+                            set_default=False,
+                        )
+                        if (
+                            _credential_provider_state(
+                                preference,
+                                ModelProviderId.DEEPSEEK,
+                                credential_configured=deepseek_api_key_is_configured(),
+                            )
+                            == "ready"
+                        ):
+                            _save_ai_provider_preference(
+                                data_root,
+                                provider=ModelProviderId.DEEPSEEK.value,
+                                deepseek_model=preference.deepseek_model,
+                                deepseek_reasoning_effort=(
+                                    preference.deepseek_reasoning_effort
                                 ),
                             )
                             outcome = "saved"
                         else:
-                            outcome = "not-configured"
+                            outcome = (
+                                "not-configured"
+                                if not deepseek_api_key_is_configured()
+                                else "not-ready"
+                            )
             except (
                 OSError,
                 ResumeWorkspaceStorageError,
@@ -8594,7 +10159,10 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 ValueError,
             ):
                 outcome = "invalid"
-            if path == "/settings/ai/openai" and action == "prepare":
+            if path in {
+                "/settings/ai/openai",
+                "/settings/ai/deepseek",
+            } and action == "prepare":
                 if outcome == "prepared":
                     self.send_response(204)
                     self.send_header("Cache-Control", "no-store")
@@ -8604,7 +10172,11 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             self.send_response(303)
             self.send_header(
                 "Location",
-                ui_url(path, self.ui_locale, provider=outcome),
+                ui_url(
+                    "/settings/ai" if outcome == "saved" else path,
+                    self.ui_locale,
+                    provider=outcome,
+                ),
             )
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -9048,8 +10620,21 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             preference = _load_ai_provider_preference(self.ui_data_root.absolute())
             generation_mode = _creator_generation_mode(preference, form, source_kind)
             ai_editorial = generation_mode != "template"
+            if ai_editorial and not _preference_provider_configured(preference):
+                self.latest_content_form = dict(form)
+                self._send_content_page(
+                    workspace_view="create",
+                    error=ui_text(
+                        self.ui_locale,
+                        "当前 AI 服务尚未就绪。请先在 AI 服务设置中配置并验证；没有改用其他服务或离线模板。",
+                        "The current AI service is not ready. Configure and validate it in AI Service settings first; no other provider or offline template was used.",
+                    ),
+                )
+                return
             gateway = _gateway_from_preference(preference) if ai_editorial else None
-            provider, model = _creator_job_provider_metadata(preference, generation_mode)
+            creator_provider, creator_model = _creator_job_provider_metadata(
+                preference, generation_mode
+            )
             data_root = self.ui_data_root.absolute()
             if source_kind == "STORY":
                 story_id = form.get("source_story_id", "")
@@ -9130,8 +10715,8 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 request=production_request,
                 runner=runner,
                 renderer=render_production_video if "VIDEO" in outputs else None,
-                provider=provider,
-                model=model,
+                provider=creator_provider,
+                model=creator_model,
             )
             self.send_response(303)
             self.send_header(
@@ -9971,18 +11556,110 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
             data_root = self.ui_data_root.absolute()
             resume_gateway: ModelGateway | None = None
             expert_gateway: ModelGateway | None = None
-            if submission.fields.get("generation_mode") != "template":
-                _apply_ai_provider_preference(submission.fields, data_root)
-                resume_gateway = _gateway_from_preference(
-                    _load_ai_provider_preference(data_root)
-                )
-            if submission.fields.get("expert_review_mode") == "openai_sol":
+            generation_selection: ResumeAISelection | None = None
+            template_requested = submission.fields.get("generation_mode") == "template"
+            if template_requested:
+                submission.fields["generation_mode"] = "template"
+                submission.fields["expert_review_mode"] = "local"
+            else:
+                try:
+                    generation_selection = _resolve_resume_ai_selection(
+                        data_root,
+                        submission.fields.get("resume_ai_selection", "default"),
+                    )
+                    if not generation_selection.ready:
+                        raise ValueError(
+                            f"{_resume_ai_selection_label(generation_selection, self.ui_locale)} "
+                            f"is {generation_selection.readiness}. Configure or test it in AI Settings before generating."
+                        )
+                    _apply_resume_ai_selection(
+                        submission.fields, generation_selection
+                    )
+                    resume_gateway = _resume_gateway_from_selection(
+                        generation_selection, data_root
+                    )
+                except ValueError as exc:
+                    self.latest_user_form = dict(submission.fields)
+                    self._send_user_page(
+                        UIActionResult(
+                            "tailored-resume",
+                            "resume AI selection",
+                            1,
+                            "",
+                            str(exc),
+                            0,
+                        )
+                    )
+                    return
+            expert_mode = submission.fields.get("expert_review_mode", "local")
+            if expert_mode == "openai_sol":
                 expert_gateway = model_gateway_for(
                     ModelProviderId.OPENAI_COMPATIBLE,
                     model=_OPENAI_EXPERT_REVIEW_MODEL,
                     openai_endpoint=_OPENAI_CHAT_COMPLETIONS_URL,
                     openai_api_key=openai_api_key(),
                 )
+                submission.fields["expert_review_provider"] = (
+                    ModelProviderId.OPENAI_COMPATIBLE.value
+                )
+                submission.fields["expert_review_model"] = _OPENAI_EXPERT_REVIEW_MODEL
+                submission.fields["expert_review_reasoning_effort"] = "low"
+            elif expert_mode == "ai":
+                expert_choice = submission.fields.get(
+                    "expert_ai_selection", "generation"
+                )
+                try:
+                    if expert_choice == "generation":
+                        if generation_selection is None:
+                            raise ValueError(
+                                "AI Expert Review requires an AI generation selection"
+                            )
+                        expert_selection = generation_selection
+                    else:
+                        expert_selection = _resolve_resume_ai_selection(
+                            data_root, expert_choice
+                        )
+                    if not expert_selection.ready:
+                        raise ValueError(
+                            f"{_resume_ai_selection_label(expert_selection, self.ui_locale)} "
+                            f"is {expert_selection.readiness}. Configure or test it in AI Settings before expert review."
+                        )
+                    submission.fields["expert_review_provider"] = (
+                        expert_selection.provider.value
+                    )
+                    submission.fields["expert_review_model"] = expert_selection.model
+                    submission.fields["expert_review_reasoning_effort"] = (
+                        expert_selection.reasoning_effort
+                    )
+                    expert_gateway = _resume_gateway_from_selection(
+                        expert_selection, data_root
+                    )
+                except ValueError as exc:
+                    self.latest_user_form = dict(submission.fields)
+                    self._send_user_page(
+                        UIActionResult(
+                            "tailored-resume",
+                            "resume expert review selection",
+                            1,
+                            "",
+                            str(exc),
+                            0,
+                        )
+                    )
+                    return
+            elif expert_mode != "local":
+                self.latest_user_form = dict(submission.fields)
+                self._send_user_page(
+                    UIActionResult(
+                        "tailored-resume",
+                        "resume expert review selection",
+                        1,
+                        "",
+                        "Expert review mode is invalid.",
+                        0,
+                    )
+                )
+                return
             resume_manager = self.resume_job_manager
             if resume_manager is None:
                 self.send_error(503, "Resume background worker is unavailable")
@@ -10012,7 +11689,13 @@ class SoloScaleLocalUIHandler(BaseHTTPRequestHandler):
                 for key in (
                     "generation_mode",
                     "provider_model",
+                    "provider_reasoning_effort",
+                    "resume_ai_selection",
                     "expert_review_mode",
+                    "expert_ai_selection",
+                    "expert_review_provider",
+                    "expert_review_model",
+                    "expert_review_reasoning_effort",
                     "resume_output_language",
                     "resume_template_preview_id",
                 )

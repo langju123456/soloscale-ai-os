@@ -1,0 +1,106 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Optional GitHub Actions role for one exact SoloScale Resume demo stack. It adopts an existing OIDC provider.",
+  "Parameters": {
+    "ExistingOidcProviderArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:iam::[0-9]{12}:oidc-provider/token.actions.githubusercontent.com$"
+    },
+    "RepositoryArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:ecr:us-east-1:[0-9]{12}:repository/[a-z0-9/-]+$"
+    },
+    "InstanceArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:ec2:us-east-1:[0-9]{12}:instance/i-[a-z0-9]+$"
+    },
+    "RunDocumentArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws:ssm:us-east-1:[0-9]{12}:document/[a-z0-9-]+$"
+    }
+  },
+  "Resources": {
+    "ResumeCloudDeployRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "soloscale-resume-cloud-github-deploy",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Ref": "ExistingOidcProviderArn"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": "repo:langju123456@178436820/soloscale-ai-os@1354608385:ref:refs/heads/codex/resume-intelligence-public-sync"
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "exact-resume-demo-delivery",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:CompleteLayerUpload",
+                    "ecr:InitiateLayerUpload",
+                    "ecr:PutImage",
+                    "ecr:UploadLayerPart",
+                    "ecr:DescribeImages"
+                  ],
+                  "Resource": {
+                    "Ref": "RepositoryArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "ssm:SendCommand",
+                  "Resource": [
+                    {
+                      "Ref": "RunDocumentArn"
+                    },
+                    {
+                      "Ref": "InstanceArn"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "ssm:GetCommandInvocation",
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ResumeCloudDeployRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

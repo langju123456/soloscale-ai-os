@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0",
+  "observed_local_date": "2026-10-02",
+  "status": "PASS",
+  "source": {
+    "head": "19c6c42f8a3a9fdd6dba526f3f2437d230e2fabd",
+    "dirty": true,
+    "hashes": {
+      "scripts/evaluate_resume_service.py": "18de9edf99f27b7b2a9411d0ce1baafa2e411dace93c9c946724d2f289296f32",
+      "scripts/migrate_resume_cloud.py": "b7c8a6f314671e9889ab1a912b5afa32e4461a4c0449026e87fe5ffed879078b",
+      "src/soloscale/resume_cloud_api.py": "1295442f575fce314dcfe3d77b208b534db35f17679caf5602ff9991b4ca00a3",
+      "src/soloscale/resume_cloud_service.py": "d0c8fd4101d551900a83bd0f82486e616181678ccb684e2feae90c4a85a0e9bc",
+      "src/soloscale/resume_cloud_repository.py": "d23eefe1bf42ddcc02d2d7aa9bf2ad4a799c2a2713c33a3b9898ef7f78312309",
+      "src/soloscale/resume_cloud_worker.py": "bca98dc0e402aa48baacb4823be02772ff93decedce1152dbe89371c1463beec",
+      "src/soloscale/resume_docx.py": "438f66b19cc7398dc480e7b2d39e88d23e1af7140622dff3f2b4d9d9eb41dd5f",
+      "migrations/resume_cloud/0001_init.sql": "67216fe8864b1e10c32264df81a0966f317279c29e1f6d034affd6d7b656cdec"
+    }
+  },
+  "scope": "synthetic template-only local HTTP/multi-process development proof",
+  "task_count": 20,
+  "worker_count": 2,
+  "worker_completed_counts": [
+    10,
+    10
+  ],
+  "batch_worker_start_to_all_success_seconds": 0.6961144169326872,
+  "synthetic_template_tasks_per_second": 28.73090904815143,
+  "checks": {
+    "authenticated_readiness": true,
+    "unauthorized_readiness_rejected": true,
+    "idempotent_replay": true,
+    "conflicting_replay_rejected": true,
+    "all_batch_outputs_valid": true,
+    "single_attempt_each": true,
+    "both_worker_processes_used": true,
+    "unique_logged_completions": true,
+    "killed_before_lease_expiry": true,
+    "interrupted_task_needs_review": true,
+    "replacement_completed_new_task": true,
+    "interrupted_task_not_requeued": true,
+    "zero_model_calls": true,
+    "expected_total_task_count": true
+  },
+  "model_calls": 0,
+  "harness_injections": {
+    "lease_seconds": 3,
+    "pause": "child-only wrapper after actual claim, before template generation",
+    "database_timestamps_modified": false,
+    "production_source_modified": false
+  },
+  "recovery": {
+    "state_before_kill": "RUNNING",
+    "database_observed_after_kill": "2026-10-01 21:06:14.605762+00:00",
+    "lease_expires_at": "2026-10-01 21:06:17.482841+00:00",
+    "interrupted_exit": -9,
+    "state_after_natural_expiry": "NEEDS_REVIEW",
+    "attempt_count": 1,
+    "failure_code": "LEASE_EXPIRED",
+    "fresh_task_state": "SUCCEEDED",
+    "kill_to_recovery_seconds": 2.9637853750027716
+  },
+  "all_owned_processes_reaped": true,
+  "not_evaluated": [
+    "production throughput",
+    "P95",
+    "HA",
+    "model semantic quality",
+    "paid-call recovery",
+    "AWS deployment",
+    "database backup restoration"
+  ]
+}

@@ -12,6 +12,7 @@ _MAX_CREDENTIAL_ENVELOPE_BYTES = 4096
 _openai_api_key: str | None = None
 _github_access_token: str | None = None
 _heygen_api_key: str | None = None
+_deepseek_api_key: str | None = None
 
 
 class DesktopCredentialError(RuntimeError):
@@ -68,18 +69,18 @@ def read_openai_credential_frame(stream: BinaryIO) -> str | None:
 
 def read_desktop_credential_envelope(
     stream: BinaryIO,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None]:
     """Read one versioned multi-credential frame without persisting either secret."""
 
     payload = _read_frame(stream, maximum=_MAX_CREDENTIAL_ENVELOPE_BYTES)
     if not payload:
-        return None, None, None
+        return None, None, None, None
     try:
         decoded = payload.decode("utf-8")
     except UnicodeDecodeError:
         raise DesktopCredentialError("desktop credential handoff is invalid") from None
     if not decoded.startswith("{"):
-        return _credential(decoded), None, None
+        return _credential(decoded), None, None, None
     try:
         envelope = json.loads(decoded)
     except json.JSONDecodeError:
@@ -92,6 +93,7 @@ def read_desktop_credential_envelope(
             "openai_api_key",
             "github_access_token",
             "heygen_api_key",
+            "deepseek_api_key",
         }
         or envelope.get("schema_version") != "1.0"
     ):
@@ -100,6 +102,7 @@ def read_desktop_credential_envelope(
         _credential(envelope.get("openai_api_key")),
         _credential(envelope.get("github_access_token")),
         _credential(envelope.get("heygen_api_key")),
+        _credential(envelope.get("deepseek_api_key")),
     )
 
 
@@ -118,12 +121,13 @@ def configure_desktop_credentials_from_stdin(
 ) -> None:
     """Load the one-shot Desktop credential envelope into process memory only."""
 
-    global _github_access_token, _heygen_api_key, _openai_api_key
+    global _deepseek_api_key, _github_access_token, _heygen_api_key, _openai_api_key
     selected_stream = stream or sys.stdin.buffer
     (
         _openai_api_key,
         _github_access_token,
         _heygen_api_key,
+        _deepseek_api_key,
     ) = read_desktop_credential_envelope(selected_stream)
 
 
@@ -157,11 +161,22 @@ def heygen_api_key_is_configured() -> bool:
     return _heygen_api_key is not None
 
 
+def deepseek_api_key() -> str | None:
+    """Return the in-memory DeepSeek key for explicit provider construction."""
+
+    return _deepseek_api_key
+
+
+def deepseek_api_key_is_configured() -> bool:
+    return _deepseek_api_key is not None
+
+
 def _clear_for_tests() -> None:
-    global _github_access_token, _heygen_api_key, _openai_api_key
+    global _deepseek_api_key, _github_access_token, _heygen_api_key, _openai_api_key
     _openai_api_key = None
     _github_access_token = None
     _heygen_api_key = None
+    _deepseek_api_key = None
 
 
 def _frame_for_tests(value: bytes) -> io.BytesIO:

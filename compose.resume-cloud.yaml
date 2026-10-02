@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: resume_cloud
+      POSTGRES_USER: resume_cloud
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [resume_cloud_postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume_cloud -d resume_cloud"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+  migrate:
+    healthcheck:
+      disable: true
+    build:
+      context: .
+      dockerfile: Dockerfile.resume-cloud
+    environment:
+      RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
+    secrets: [postgres_password]
+    user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
+    entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python scripts/migrate_resume_cloud.py"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.resume-cloud
+    environment:
+      RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
+      RESUME_CLOUD_BEARER_TOKEN_FILE: /run/secrets/api_bearer_token
+    secrets: [postgres_password, api_bearer_token]
+    user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
+    entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_api"]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  worker:
+    healthcheck:
+      disable: true
+    build:
+      context: .
+      dockerfile: Dockerfile.resume-cloud
+    environment:
+      RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
+    secrets: [postgres_password]
+    user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
+    entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_worker"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+secrets:
+  postgres_password:
+    file: ${RESUME_CLOUD_SECRET_DIR:?Set an external secret directory}/postgres_password
+  api_bearer_token:
+    file: ${RESUME_CLOUD_SECRET_DIR:?Set an external secret directory}/api_bearer_token
+volumes:
+  resume_cloud_postgres:

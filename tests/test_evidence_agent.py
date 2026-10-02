@@ -27,6 +27,7 @@ from soloscale.evidence_agent import (
     QueryPlan,
     Reasoner,
     ReasonerInvalidResponseError,
+    ReasonerTimeoutError,
     ReasonerTransportError,
     ResponseModelT,
     _focused_truncate_utf8,
@@ -1140,8 +1141,11 @@ def test_low_evidence_returns_only_unsupported_and_open_questions(tmp_path: Path
     assert result.claims == []
     assert result.refs == []
     assert "No evidence-backed claim" in result.answer
-    assert "The requested outcome cannot be established." in result.unsupported
+    assert result.unsupported == [
+        "Information is insufficient: no retrieved evidence fit the grounded-draft context."
+    ]
     assert any("No retrieved evidence" in item for item in result.limitations)
+    assert len(reasoner.calls) == 2
 
 
 def test_unknown_evidence_reference_fails_closed_and_writes_safe_failure(
@@ -1298,6 +1302,62 @@ def test_ollama_requests_native_json_schema_with_deterministic_options() -> None
     assert profile.done_reason == "stop"
     assert profile.thinking_enabled is False
     assert profile.thinking_chars == 0
+    assert profile.requested_context_tokens is None
+
+
+def test_ollama_context_option_is_optional_and_requires_a_positive_integer() -> None:
+    captured: dict[str, Any] = {}
+
+    def open_request(request: Any, *, timeout: float) -> FakeHTTPResponse:
+        del timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return FakeHTTPResponse(
+            json.dumps({"message": {"content": json.dumps({"queries": ["evidence"]})}}).encode()
+        )
+
+    reasoner = OllamaReasoner(context_tokens=16_384, opener=open_request)
+    assert reasoner.complete(QueryPlan, system="system", user="user").queries == ["evidence"]
+    assert captured["payload"]["options"]["num_ctx"] == 16_384
+    assert reasoner.last_call_profile is not None
+    assert reasoner.last_call_profile.requested_context_tokens == 16_384
+
+    for invalid in (0, -1, True, "16384"):
+        with pytest.raises(ValueError, match="context_tokens"):
+            OllamaReasoner(context_tokens=invalid)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("deadline"), urllib.error.URLError(TimeoutError("deadline"))],
+)
+def test_ollama_timeout_is_classified_separately_from_transport(
+    failure: Exception,
+) -> None:
+    calls = 0
+
+    def open_request(*args: object, **kwargs: object) -> FakeHTTPResponse:
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise failure
+
+    reasoner = OllamaReasoner(opener=open_request)
+    with pytest.raises(ReasonerTimeoutError):
+        reasoner.complete(QueryPlan, system="system", user="user")
+    assert calls == 1
+
+
+def test_ollama_http_error_remains_a_transport_failure() -> None:
+    def open_request(*args: object, **kwargs: object) -> FakeHTTPResponse:
+        del args, kwargs
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:11434", 500, "error", Message(), None
+        )
+
+    reasoner = OllamaReasoner(opener=open_request)
+    with pytest.raises(ReasonerTransportError) as error:
+        reasoner.complete(QueryPlan, system="system", user="user")
+    assert not isinstance(error.value, ReasonerTimeoutError)
 
 
 def test_ollama_default_transport_disables_proxies_and_redirects(
