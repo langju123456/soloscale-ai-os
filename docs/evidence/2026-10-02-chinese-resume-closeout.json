@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.1",
+  "scope": "one operator-selected Chinese resume and JD; localhost only; draft for review",
+  "baseline_sha": "6ef52b414dd51bbe731a0d191c1c368fffa8bc6a",
+  "model": "qwen3:8b",
+  "total_local_attempts": 3,
+  "paid_calls": 0,
+  "automatic_retries": 0,
+  "final_attempt_calls": 1,
+  "quality_proxy_status": "QUALITY_MET",
+  "requested_material_edits": 2,
+  "assistant_semantic_review": "PASS_WITH_BOUNDED_SCOPE",
+  "assistant_review_findings": [
+    "Two project bullets materially compressed from their own source facts",
+    "All output education/employment identities, dates, numbers and unedited paragraphs preserved",
+    "No new technology, ownership, scale, causal effect or unmeasured improvement in final DOCX",
+    "Non-rendered role summary and gap labels remain unverified positioning output, not resume facts"
+  ],
+  "input_unchanged": true,
+  "formal_resume_updated": false,
+  "application_submitted": false,
+  "human_application_approval": "PENDING",
+  "layout_review": "PASS: native Pages PDF export, 1 page, all page PNGs inspected; no clipping/overlap/missing content",
+  "render_method": "Pages through supported UI; PDFKit PNG render. Bundled dependency lookup unavailable in this thread.",
+  "final_validation_source_hashes": {
+    "src/soloscale/resume_docx.py": "449c9386fe997879e5571f121c5cc61c8b825f5d25b7ecc13d3c39ee8a635c01",
+    "src/soloscale/local_ui.py": "8bdbe403453b90bb2dff1f636e83288f30fd1e0c2860ee17aa5919fee9d7d1e4"
+  },
+  "limitations": [
+    "One real operator case; two failures before bounded success; not a general success-rate estimate",
+    "Minor prompt constraint wording and conservative inflation-term compatibility finalized after model generation; the recorded response is revalidated below",
+    "Gap/positioning semantic coverage is not verified",
+    "Human approval is required before application use"
+  ],
+  "pre_release_review_source_hashes": {
+    "src/soloscale/resume_docx.py": "51b6a3aa1530470a4d21441bd9981548257b841f8d7869c24c45c26ca891ecd7",
+    "src/soloscale/local_ui.py": "8bdbe403453b90bb2dff1f636e83288f30fd1e0c2860ee17aa5919fee9d7d1e4"
+  },
+  "model_generation_system_prompt_sha256": "04696dcb505b9ab29f18a47d9bc94669d61f37b3b7293ba6dcd8457794ac035c",
+  "recorded_response_final_validator_replay": {
+    "passed": true,
+    "live_model_calls": 0,
+    "same_exported_paragraphs": true,
+    "material_edits": 2,
+    "rejected_rewrites": 0,
+    "kind": "recorded response revalidation; not a new real model evaluation"
+  }
+}

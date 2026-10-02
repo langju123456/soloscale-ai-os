@@ -4,7 +4,13 @@
 
 [**Watch the Hero Demo →**](https://soloscale-showcase.vercel.app/showcase/soloscale-hero-demo-v1)
 
-> Current package: `0.4.1` · Python `3.11+` · Local-first · Human-controlled
+> Current package: `0.4.2` · Python `3.11+` · Local-first · Human-controlled
+
+**Closeout scope:** local operator workflows, the existing public Showcase, and a
+provenance-matched macOS candidate. See [current delivery gate](TASK.md) and
+[verification and release procedure](docs/engineering/closeout-0.4.2.md). The hosted
+Resume service is locally evaluated; AWS deployment is deferred. A generated DOCX
+still requires content review before application use.
 
 The current operator priority is job-search outcomes: applications, interviews, and offers.
 Learning and building proceed in parallel, while real recruiting feedback chooses the next

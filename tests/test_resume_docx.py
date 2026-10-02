@@ -2182,6 +2182,67 @@ def test_chinese_editorial_synthesis_keeps_fact_boundary_and_rejects_inflation()
     }
 
 
+def test_chinese_rewrite_rejects_unmeasured_outcome_and_keeps_mechanism() -> None:
+    source = "实现 RAG 检索，通过引用和来源哈希支持结果追溯。"
+    profile = CandidateProfile(skills=["RAG"], project_bullets=[source])
+    strategy = RoleStrategy(
+        role_summary="RAG role",
+        top_hiring_signals=["Required: RAG."],
+        evidence_priority=["PROFILE-01"],
+        skill_priority=["RAG"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="通过引用和来源哈希追溯 RAG 检索结果，提升模型输出的准确性。",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+        ],
+        rewrite_guidance="仅使用来源事实。",
+    )
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        strategy, profile=profile, job_description="Required: RAG.", output_locale="zh-CN"
+    )
+    assert selected.bullet_rewrites[0].text == source
+    assert ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION in {
+        failure.rule_code for failure in diagnostics.failures
+    }
+
+    payload = strategy.model_dump(mode="json")
+    payload["bullet_rewrites"][0]["text"] = "通过引用和来源哈希追溯 RAG 检索结果。"
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        RoleStrategy.model_validate(payload),
+        profile=profile,
+        job_description="Required: RAG.",
+        output_locale="zh-CN",
+    )
+    assert selected.bullet_rewrites[0].text == payload["bullet_rewrites"][0]["text"]
+    assert diagnostics.validator_status == "accepted"
+
+
+def test_chinese_rewrite_allows_source_supported_improvement_translation() -> None:
+    source = "Improved RAG retrieval accuracy."
+    profile = CandidateProfile(skills=["RAG"], project_bullets=[source])
+    strategy = RoleStrategy(
+        role_summary="RAG role",
+        top_hiring_signals=["Required: RAG."],
+        evidence_priority=["PROFILE-01"],
+        skill_priority=["RAG"],
+        bullet_rewrites=[
+            GroundedResumeBulletRewrite(
+                profile_entry_id="PROFILE-01",
+                text="提升 RAG 检索准确性。",
+                source_fact_ids=_fact_ids(profile, "PROFILE-01"),
+            ),
+        ],
+        rewrite_guidance="仅使用来源事实。",
+    )
+    selected, _entries, diagnostics = _select_safe_rewrites(
+        strategy, profile=profile, job_description="Required: RAG.", output_locale="zh-CN"
+    )
+    assert selected.bullet_rewrites[0].text == "提升 RAG 检索准确性。"
+    assert diagnostics.validator_status == "accepted"
+
+
 def test_cross_locale_fact_match_accepts_chinese_facts_in_english() -> None:
     profile = CandidateProfile(
         skills=["RAG", "FastAPI"],

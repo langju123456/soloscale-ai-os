@@ -142,25 +142,23 @@ _STOP_WORDS = {
 }
 
 _ZH_RESUME_EDITOR_SYSTEM_PROMPT = (
-    "你是一位中国大陆 AI 工程师简历编辑。依据本次 JD，使用 "
-    "candidate_profile 中已获批的不可变事实，编辑一页中文求职简历。"
-    "目标是让招聘者更快看懂候选人与岗位相关的实际工程工作；只返回给定 JSON Schema。\n"
-    "\n"
-    "可自然压缩、组合和重排重点，不要求保留每项细节或逐词对应。至少两条与 JD "
-    "最相关的项目 bullet 要作真实改写：改变信息组织、句式或重点，而不是只改标点。"
-    "其余关联较弱的条目可保留原文。不得编造或扩大技术、数字、项目/客户归属、职责、规模、"
-    "结果或因果；不得把参与写成主导、本地验证写成生产部署。技术名、数字和 "
-    "__SS_PRIVATE_*__ 占位符必须原样保留。\n"
-    "\n"
+    "你是中国大陆 AI 工程师简历编辑。依据本次 JD 和 candidate_profile 中已获批的不可变事实，"
+    "编辑一页中文简历，让招聘者看懂相关的实际工作；只返回给定 JSON Schema。\n"
+    "可自然压缩、组合和重排重点，不要求保留每项细节或逐词对应。至少两条相关项目"
+    "bullet 要实质改写：从来源选择相关问题、机制或验证工作开头，再组织方法和"
+    "已有依据。不要仅替换实现、构建、开发等动词或调整标点；可删非关键细节。"
+    "没有效果证据只写机制和验证，不写提升准确性、提高效率、确保完整性。"
+    "不编造或扩大技术、数字、项目/客户归属、职责、规模、结果或因果；不把参与"
+    "写成主导、本地验证写成生产部署。事实不可变，措辞可变；采用的技术名、分隔符、"
+    "数字须保持原样。__SS_PRIVATE_*__ 占位符原样保留。\n"
     "PROFILE key 绑定原始履历，不能按 evidence_priority 重新编号或移动内容。"
-    "每个 key 给出 text、kind、target_fact_id 和 supporting_fact_ids："
-    "target_fact_id 必须属于该 key，supporting_fact_ids 只能引用已获批事实。"
-    "单一来源用 REWRITE；确实组合至少两个事实且正文表达每个事实的真实成分时才用 SYNTHESIS。"
-    "evidence_priority 与 skill_priority 均须各包含本次全部标识一次。\n"
-    "\n"
-    "summary_rewrite 仅在可由至少两个事实组合时填写，否则为 null。"
-    "unsupported_requirements 只能引用 JD 原句；positioning_brief 和招聘信号仅供定位，不要复述。"
-    "使用自然、简洁的专业中文。招聘信号：\n"
+    "每个 key 填 text、kind、target_fact_id、supporting_fact_ids："
+    "target_fact_id 必须属于该 key；supporting_fact_ids 只能引用已获批事实。"
+    "单一来源用 REWRITE；表达至少两个事实真实成分时才用 SYNTHESIS。"
+    "evidence_priority 和 skill_priority 各包含全部标识一次。\n"
+    "summary_rewrite 仅在至少两事实支持时填，否则 null。unsupported_requirements"
+    "只引用缺乏事实支持的能力要求原句；公司、职位、地点、年限、链接和标题不是"
+    "能力缺口。positioning_brief 和招聘信号只供定位，不复述。简洁专业中文。招聘信号：\n"
 )
 
 
@@ -1264,7 +1262,10 @@ _ZH_INFLATION_TERMS: tuple[
         ResumeValidationRuleCode.CLAIM_SCALE_INFLATION,
     ),
     (
-        ("显著提升", "大幅提升", "大幅降低", "收入增长", "节省成本"),
+        (
+            "提升", "提高", "显著提升", "大幅提升", "大幅降低", "收入增长", "节省成本",
+            "确保数据完整性", "确保数据一致性",
+        ),
         ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION,
     ),
 )
@@ -1649,7 +1650,15 @@ def _validate_role_strategy(
                 reject(rule_code, f"{json_path}.text", claim_id=claim_id)
         if output_locale == "zh-CN":
             for phrases, rule_code in _ZH_INFLATION_TERMS:
-                if any(phrase in text and phrase not in source_union for phrase in phrases):
+                if any(
+                    phrase in text
+                    and phrase not in source_union
+                    and not (
+                        phrase in {"提升", "提高"}
+                        and "improved" in source_words
+                    )
+                    for phrase in phrases
+                ):
                     reject(rule_code, f"{json_path}.text", claim_id=claim_id)
 
     for index, rewrite in enumerate(strategy.bullet_rewrites):
