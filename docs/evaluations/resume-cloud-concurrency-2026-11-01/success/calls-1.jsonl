@@ -1,0 +1,16 @@
+{"ordinal": 2, "pid": 87807, "phase": "batch", "start_ns": 3867672397907625, "end_ns": 3867672553845166, "duration_seconds": 0.155937541, "error_category": null}
+{"ordinal": 1, "pid": 87807, "phase": "batch", "start_ns": 3867672397725041, "end_ns": 3867672553915666, "duration_seconds": 0.156190625, "error_category": null}
+{"ordinal": 3, "pid": 87807, "phase": "batch", "start_ns": 3867672610314375, "end_ns": 3867672765064958, "duration_seconds": 0.154750583, "error_category": null}
+{"ordinal": 4, "pid": 87807, "phase": "batch", "start_ns": 3867672613847500, "end_ns": 3867672767675125, "duration_seconds": 0.153827625, "error_category": null}
+{"ordinal": 5, "pid": 87807, "phase": "batch", "start_ns": 3867672832528000, "end_ns": 3867672983479708, "duration_seconds": 0.150951708, "error_category": null}
+{"ordinal": 6, "pid": 87807, "phase": "batch", "start_ns": 3867672839298375, "end_ns": 3867672989816791, "duration_seconds": 0.150518416, "error_category": null}
+{"ordinal": 7, "pid": 87807, "phase": "batch", "start_ns": 3867673036493458, "end_ns": 3867673191785250, "duration_seconds": 0.155291792, "error_category": null}
+{"ordinal": 8, "pid": 87807, "phase": "batch", "start_ns": 3867673041835583, "end_ns": 3867673196980083, "duration_seconds": 0.1551445, "error_category": null}
+{"ordinal": 10, "pid": 87807, "phase": "batch", "start_ns": 3867673257392958, "end_ns": 3867673409794041, "duration_seconds": 0.152401083, "error_category": null}
+{"ordinal": 9, "pid": 87807, "phase": "batch", "start_ns": 3867673254248500, "end_ns": 3867673411240625, "duration_seconds": 0.156992125, "error_category": null}
+{"ordinal": 11, "pid": 87807, "phase": "batch", "start_ns": 3867673466089541, "end_ns": 3867673621353041, "duration_seconds": 0.1552635, "error_category": null}
+{"ordinal": 12, "pid": 87807, "phase": "batch", "start_ns": 3867673471025125, "end_ns": 3867673624203250, "duration_seconds": 0.153178125, "error_category": null}
+{"ordinal": 13, "pid": 87807, "phase": "batch", "start_ns": 3867673676001750, "end_ns": 3867673828263250, "duration_seconds": 0.1522615, "error_category": null}
+{"ordinal": 14, "pid": 87807, "phase": "batch", "start_ns": 3867673680288500, "end_ns": 3867673833655916, "duration_seconds": 0.153367416, "error_category": null}
+{"ordinal": 15, "pid": 87807, "phase": "batch", "start_ns": 3867673879511666, "end_ns": 3867674033933625, "duration_seconds": 0.154421959, "error_category": null}
+{"ordinal": 16, "pid": 87807, "phase": "batch", "start_ns": 3867673885278708, "end_ns": 3867674036739416, "duration_seconds": 0.151460708, "error_category": null}

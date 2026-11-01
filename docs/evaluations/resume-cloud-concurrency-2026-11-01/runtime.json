@@ -1,0 +1,22 @@
+{
+  "python": "3.12.13 (main, Mar  3 2026, 12:39:30) [Clang 21.0.0 (clang-2100.0.123.102)]",
+  "platform": "macOS-26.3.1-arm64-arm-64bit",
+  "machine": "arm64",
+  "dependencies": {
+    "soloscale-ai-os": "0.4.2",
+    "pydantic": "2.13.5",
+    "psycopg": "3.3.6",
+    "fastapi": "0.162.0",
+    "uvicorn": "0.54.0",
+    "pytest": "9.2.0",
+    "ruff": "0.17.3",
+    "mypy": "1.20.2",
+    "opentelemetry-api": "1.45.2",
+    "opentelemetry-sdk": "1.45.2",
+    "opentelemetry-exporter-otlp-proto-http": "1.45.2"
+  },
+  "baseline_head": "787264fa783d19a910052642627e8f7ab2798561",
+  "docker_engine": "29.6.1",
+  "postgres_image": "postgres:16-alpine",
+  "scope": "local synthetic evaluation only"
+}
