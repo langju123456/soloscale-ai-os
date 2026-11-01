@@ -11,6 +11,8 @@ from contextvars import ContextVar
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
+from soloscale.resume_cloud_metrics import ResumeCloudMetrics
+
 _ACTIVE_TELEMETRY: ContextVar[Telemetry | None] = ContextVar("resume_cloud_telemetry", default=None)
 _TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 P = ParamSpec("P")
@@ -24,12 +26,16 @@ class Telemetry:
         exporter: str = "console",
         endpoint: str = "",
         provider: Any | None = None,
+        metrics: ResumeCloudMetrics | None = None,
     ) -> None:
         self.enabled = enabled
         self._provider: Any | None = provider
         self._trace: Any | None = None
         self._propagate: Any | None = None
         self._closed = False
+        self.metrics = metrics or ResumeCloudMetrics.from_environment(
+            os.environ.get("RESUME_CLOUD_METRICS_EXPORTER", "console").casefold(), endpoint
+        )
         if not enabled:
             return
         from opentelemetry import propagate, trace
@@ -109,8 +115,12 @@ class Telemetry:
                     },
                 ) as span:
                     try:
-                        result = gateway.complete(
-                            schema, system=system, user=user, reasoning_effort=reasoning_effort
+                        with telemetry.metrics.model_call():
+                            result = gateway.complete(
+                                schema, system=system, user=user, reasoning_effort=reasoning_effort
+                            )
+                        telemetry.metrics.observe_model_duration(
+                            time.monotonic() - started, outcome="success"
                         )
                         self.last_call_profile = getattr(gateway, "last_call_profile", None)
                         if span is not None:
@@ -124,6 +134,9 @@ class Telemetry:
                             span.set_attribute("outcome", "succeeded")
                         return result
                     except Exception as exc:
+                        telemetry.metrics.observe_model_duration(
+                            time.monotonic() - started, outcome="error"
+                        )
                         details = getattr(exc, "details", None)
                         if span is not None:
                             duration_ms = max(0, int((time.monotonic() - started) * 1000))
@@ -149,6 +162,7 @@ class Telemetry:
             self._closed = True
             self._provider.force_flush()
             self._provider.shutdown()
+        self.metrics.shutdown()
 
 
 def traced_stage(name: str) -> Callable[[Callable[P, T]], Callable[P, T]]:

@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from soloscale.resume_cloud_cache import ResultCacheKey, sha256_text
 from soloscale.resume_cloud_models import TaskMode, TaskState
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 5
 BASE_SCHEMA_RELATIONS = {
     ("public", "resume_cloud_schema_version"),
     ("public", "resume_cloud_tasks"),
@@ -58,6 +58,8 @@ class CloudTask:
     worker_token: str | None
     failure_code: str | None
     traceparent: str | None
+    queued_at: datetime | None
+    started_at: datetime | None
 
 
 class ResumeCloudRepository:
@@ -86,6 +88,8 @@ class ResumeCloudRepository:
             worker_token=(str(row["worker_token"]) if row.get("worker_token") else None),
             failure_code=row.get("failure_code"),
             traceparent=row.get("traceparent"),
+            queued_at=row.get("queued_at"),
+            started_at=row.get("started_at"),
         )
 
     def create_or_replay(
@@ -213,7 +217,7 @@ class ResumeCloudRepository:
     def queue(self, task_id: str) -> CloudTask | None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """UPDATE resume_cloud_tasks SET state='QUEUED', updated_at=now()
+                """UPDATE resume_cloud_tasks SET state='QUEUED', queued_at=now(), updated_at=now()
                 WHERE id=%s AND state='PREPARED' AND input_expires_at >= now()
                     AND resume_docx IS NOT NULL AND job_description IS NOT NULL
                 RETURNING *""",
@@ -353,6 +357,7 @@ class ResumeCloudRepository:
         self, on_needs_review: Callable[[str, str | None], None] | None = None
     ) -> int:
         """Never requeue an interrupted model call; it may already have been charged."""
+        recovered_rows: list[dict[str, Any]]
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks
                 WHERE state='RUNNING' AND lease_expires_at < now() ORDER BY lease_expires_at LIMIT 100)
@@ -362,9 +367,6 @@ class ResumeCloudRepository:
                 RETURNING t.id, t.traceparent""")
             recovered_rows = cur.fetchall()
             recovered = len(recovered_rows)
-            if on_needs_review is not None:
-                for row in recovered_rows:
-                    on_needs_review(str(row["id"]), row.get("traceparent"))
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks WHERE state IN ('PREPARED','QUEUED')
                 AND input_expires_at < now() ORDER BY input_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET state='FAILED', failure_code='INPUT_EXPIRED', resume_docx=NULL,
@@ -381,8 +383,12 @@ class ResumeCloudRepository:
                 WHERE (cache.client_key, cache.raw_resume_sha256, cache.job_description_sha256, cache.mode,
                 cache.provider, cache.model, cache.base_url_sha256, cache.pipeline_sha256) =
                 (selected.client_key, selected.raw_resume_sha256, selected.job_description_sha256, selected.mode,
-                selected.provider, selected.model, selected.base_url_sha256, selected.pipeline_sha256)""")
-            return recovered
+                selected.provider, selected.model, selected.base_url_sha256, selected.pipeline_sha256)
+                AND cache.output_expires_at < now()""")
+        if on_needs_review is not None:
+            for row in recovered_rows:
+                on_needs_review(str(row["id"]), row.get("traceparent"))
+        return recovered
 
     @staticmethod
     def _expire_one(cur: psycopg.Cursor[dict[str, Any]], task_id: str) -> None:

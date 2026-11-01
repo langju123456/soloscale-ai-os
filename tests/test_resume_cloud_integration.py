@@ -7,12 +7,13 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -107,6 +108,62 @@ def test_create_idempotency_worker_and_download() -> None:
     assert output.headers["x-soloscale-output-sha256"]
 
 
+def test_metrics_count_create_replay_conflict_and_create_rate_limit() -> None:
+    assert DATABASE_URL is not None
+    telemetry = Telemetry()
+    settings = CloudSettings(
+        database_url=DATABASE_URL,
+        bearer_token="t" * 32,
+        rate_limit_capacity=1,
+        rate_limit_refill_per_second=1.0,
+    )
+    headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
+    with TestClient(create_app(settings, telemetry=telemetry)) as client:
+        assert client.get("/metrics").status_code == 401
+        assert client.post("/tasks", json=_payload(), headers=headers).status_code == 201
+        assert client.post("/tasks", json=_payload(), headers=headers).status_code == 201
+        changed = _payload()
+        changed["job_description"] = "different"
+        assert client.post("/tasks", json=changed, headers=headers).status_code == 409
+        limited = client.post(
+            "/tasks",
+            json=_payload(),
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert limited.status_code == 429
+        metric_response = client.get(
+            "/metrics", headers={"Authorization": headers["Authorization"]}
+        )
+        snapshot = cast(dict[str, Any], metric_response.json())
+    assert snapshot["counters"] == {
+        "tasks_created": 1,
+        "tasks_replayed": 1,
+        "idempotency_conflicts": 1,
+        "task_create_rate_limited": 1,
+        "manual_review_transitions": 0,
+        "cache_lookups": 0,
+        "cache_hits": 0,
+    }
+
+
+def test_queue_timestamp_is_not_reset_and_excludes_prepared_delay() -> None:
+    client, service = _client()
+    headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
+    task_id = client.post("/tasks", json=_payload(), headers=headers).json()["id"]
+    time.sleep(0.03)
+    assert client.post(f"/tasks/{task_id}/process", headers=headers).status_code == 200
+    first = service.repository.get(task_id)
+    assert first is not None and first.queued_at is not None
+    time.sleep(0.01)
+    assert client.post(f"/tasks/{task_id}/process", headers=headers).status_code == 200
+    repeated = service.repository.get(task_id)
+    assert repeated is not None and repeated.queued_at == first.queued_at
+    assert service.process_one() is not None
+    metrics = cast(dict[str, Any], service.telemetry.metrics.snapshot())
+    observed = cast(dict[str, Any], metrics["histograms"])["queue_wait_seconds"]
+    assert cast(dict[str, Any], observed)["count"] == 1
+
+
 def test_traces_continue_from_create_to_claim_pipeline_and_terminal() -> None:
     pytest.importorskip("opentelemetry.sdk.trace")
     from opentelemetry.sdk.trace import TracerProvider
@@ -136,17 +193,17 @@ def test_traces_continue_from_create_to_claim_pipeline_and_terminal() -> None:
     api = next(
         span
         for span in finished
-        if span.name == "api.tasks.create" and span.attributes["outcome"] == "created"
+        if span.name == "api.tasks.create" and (span.attributes or {}).get("outcome") == "created"
     )
     claim = spans["worker.claim"]
     execute = spans["worker.execute"]
     terminal = spans["worker.terminal"]
-    assert api.attributes["outcome"] == "created"
+    assert (api.attributes or {})["outcome"] == "created"
     assert claim.context.trace_id == api.context.trace_id == execute.context.trace_id
     assert claim.parent is not None and claim.parent.span_id == api.context.span_id
     assert execute.parent is not None and execute.parent.span_id == claim.context.span_id
     assert terminal.parent is not None and terminal.parent.span_id == execute.context.span_id
-    assert terminal.attributes["terminal.state"] == "SUCCEEDED"
+    assert (terminal.attributes or {})["terminal.state"] == "SUCCEEDED"
 
 
 def test_result_cache_reuses_same_client_without_extending_expiry(
@@ -178,11 +235,52 @@ def test_result_cache_reuses_same_client_without_extending_expiry(
     client.post(f"/tasks/{second}/process", headers=headers)
     reused = service.process_one()
     assert calls == 1 and reused is not None and reused.state.value == "SUCCEEDED"
+    assert service.telemetry.metrics.snapshot()["counters"] == {
+        "tasks_created": 0,
+        "tasks_replayed": 0,
+        "idempotency_conflicts": 0,
+        "task_create_rate_limited": 0,
+        "manual_review_transitions": 0,
+        "cache_lookups": 2,
+        "cache_hits": 1,
+    }
     with service.repository._connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT output_expires_at FROM resume_cloud_tasks WHERE id=%s", (second,))
         reused_expiry = cur.fetchone()
         assert reused_expiry is not None
         assert reused_expiry["output_expires_at"] == original_expiry
+
+
+def test_ai_cache_hit_skips_actual_gateway_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, service = _client()
+    headers = {"Authorization": "Bearer " + "t" * 32, "X-Client-ID": "alpha"}
+    payload = _payload()
+    payload["mode"] = "ai"
+    payload["approve_external_model_call"] = True
+    calls = 0
+
+    class Gateway:
+        descriptor = _gateway().descriptor
+
+        def complete(self, *_: object, **__: object) -> object:
+            nonlocal calls
+            calls += 1
+            return object()
+
+    def tailor(*_: object, gateway: object, **__: object) -> object:
+        gateway.complete(object, system="safe", user="safe")  # type: ignore[attr-defined]
+        return type("Result", (), {"content": b"cached-ai-docx"})()
+
+    monkeypatch.setattr("soloscale.resume_cloud_service.tailor_resume_docx_with_gateway", tailor)
+    for _ in range(2):
+        task_id = client.post(
+            "/tasks", json=payload, headers={**headers, "Idempotency-Key": str(uuid.uuid4())}
+        ).json()["id"]
+        assert client.post(f"/tasks/{task_id}/process", headers=headers).status_code == 200
+        assert service.process_one(gateway=cast(ModelGateway, Gateway())) is not None
+    assert calls == 1
+    counters = service.telemetry.metrics.snapshot()["counters"]
+    assert counters["cache_lookups"] == 2 and counters["cache_hits"] == 1  # type: ignore[index]
 
 
 def test_result_cache_does_not_cross_client_or_survive_cleanup(
@@ -594,7 +692,7 @@ def test_migrator_refuses_relation_in_other_schema(relation_sql: str) -> None:
     assert result.returncode != 0
 
 
-def test_migrator_rerun_accepts_exact_v3_schema() -> None:
+def test_migrator_rerun_accepts_latest_schema() -> None:
     assert DATABASE_URL is not None
     result = subprocess.run(
         [sys.executable, Path(__file__).parents[1] / "scripts" / "migrate_resume_cloud.py"],
@@ -690,10 +788,10 @@ def test_migrator_refuses_v3_relations_with_v1_version() -> None:
         assert result.returncode != 0
     finally:
         with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=4")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=5")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4, 5))"
             )
 
 
@@ -711,10 +809,10 @@ def test_ready_requires_latest_schema_version() -> None:
         assert not repository.ready()
     finally:
         with repository._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=4")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=5")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4, 5))"
             )
 
 

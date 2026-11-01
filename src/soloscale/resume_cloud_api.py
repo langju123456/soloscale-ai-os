@@ -90,6 +90,10 @@ def create_app(
             raise _error(503, "NOT_READY")
         return {"ready": True}
 
+    @app.get("/metrics", dependencies=[Depends(authorize)])
+    def metrics() -> dict[str, object]:
+        return selected_telemetry.metrics.snapshot()
+
     @app.post("/tasks", status_code=201, dependencies=[Depends(authorize)])
     def create_task(
         payload: CreateTaskRequest,
@@ -116,6 +120,7 @@ def create_app(
                         selected_telemetry.traceparent(),
                     )
                 except RateLimitExceeded as exc:
+                    selected_telemetry.metrics.increment("task_create_rate_limited")
                     _span_error(span, "rate_limited")
                     raise HTTPException(
                         status_code=429,
@@ -124,6 +129,7 @@ def create_app(
                     ) from exc
                 except ValueError as exc:
                     if str(exc) == "IDEMPOTENCY_CONFLICT":
+                        selected_telemetry.metrics.increment("idempotency_conflicts")
                         _span_error(span, "idempotency_conflict")
                         raise _error(409, "IDEMPOTENCY_CONFLICT") from exc
                     _span_error(span, "persistence")
@@ -136,6 +142,9 @@ def create_app(
                     raise _error(422, "INVALID_RESUME") from exc
                 if span is not None:
                     span.set_attribute("outcome", "replayed" if replayed else "created")
+                selected_telemetry.metrics.increment(
+                    "tasks_replayed" if replayed else "tasks_created"
+                )
         except HTTPException:
             raise
         return _view(task)

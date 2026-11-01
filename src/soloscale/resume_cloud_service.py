@@ -241,6 +241,10 @@ class ResumeCloudService:
             task = self.repository.claim(self.settings.lease_seconds)
             if task is None:
                 return None
+            if task.queued_at is not None and task.started_at is not None:
+                self.telemetry.metrics.observe_queue_wait(
+                    max(0.0, (task.started_at - task.queued_at).total_seconds())
+                )
             assert (
                 task.resume_docx is not None
                 and task.job_description is not None
@@ -261,11 +265,22 @@ class ResumeCloudService:
                     execute_traceparent = self.telemetry.traceparent()
                     if task.mode is TaskMode.TEMPLATE:
                         cache_key = self._cache_key(task, None)
-                        if cache_key is not None and self.repository.complete_from_cache(
-                            task.id, task.worker_token, cache_key
-                        ):
-                            return self.repository.get(task.id)
-                        output = tailor_resume_docx(task.resume_docx, task.job_description).content
+                        if cache_key is not None:
+                            self.telemetry.metrics.increment("cache_lookups")
+                            if self.repository.complete_from_cache(
+                                task.id, task.worker_token, cache_key
+                            ):
+                                self.telemetry.metrics.increment("cache_hits")
+                                with self.telemetry.span(
+                                    "worker.terminal",
+                                    {"terminal.state": "SUCCEEDED", "cache_hit": True},
+                                ):
+                                    pass
+                                return self.repository.get(task.id)
+                        with self.telemetry.span("resume.template.pipeline"):
+                            output = tailor_resume_docx(
+                                task.resume_docx, task.job_description
+                            ).content
                     else:
                         if not task.approve_external_model_call:
                             raise RuntimeError("MODEL_APPROVAL_REQUIRED")
@@ -274,10 +289,18 @@ class ResumeCloudService:
                             raise RuntimeError("MODEL_NOT_CONFIGURED")
                         selected_gateway = self.telemetry.wrap_gateway(selected_gateway)
                         cache_key = self._cache_key(task, selected_gateway)
-                        if cache_key is not None and self.repository.complete_from_cache(
-                            task.id, task.worker_token, cache_key
-                        ):
-                            return self.repository.get(task.id)
+                        if cache_key is not None:
+                            self.telemetry.metrics.increment("cache_lookups")
+                            if self.repository.complete_from_cache(
+                                task.id, task.worker_token, cache_key
+                            ):
+                                self.telemetry.metrics.increment("cache_hits")
+                                with self.telemetry.span(
+                                    "worker.terminal",
+                                    {"terminal.state": "SUCCEEDED", "cache_hit": True},
+                                ):
+                                    pass
+                                return self.repository.get(task.id)
                         if not self.repository.mark_model_call(task.id, task.worker_token):
                             raise RuntimeError("TASK_LEASE_LOST")
                         with _LeaseHeartbeat(
