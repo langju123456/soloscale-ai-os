@@ -264,9 +264,13 @@ class ResumeCloudRepository:
                     base_url_sha256,pipeline_sha256,output_docx,output_sha256,output_expires_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (client_key,raw_resume_sha256,job_description_sha256,mode,provider,
-                    model,base_url_sha256,pipeline_sha256) DO UPDATE SET output_docx=EXCLUDED.output_docx,
-                    output_sha256=EXCLUDED.output_sha256, output_expires_at=EXCLUDED.output_expires_at,
-                    created_at=now()""",
+                    model,base_url_sha256,pipeline_sha256) DO UPDATE SET
+                    output_docx=CASE WHEN EXCLUDED.output_expires_at < resume_cloud_result_cache.output_expires_at
+                        THEN EXCLUDED.output_docx ELSE resume_cloud_result_cache.output_docx END,
+                    output_sha256=CASE WHEN EXCLUDED.output_expires_at < resume_cloud_result_cache.output_expires_at
+                        THEN EXCLUDED.output_sha256 ELSE resume_cloud_result_cache.output_sha256 END,
+                    output_expires_at=LEAST(resume_cloud_result_cache.output_expires_at,
+                        EXCLUDED.output_expires_at)""",
                     (
                         cache_key.client_key,
                         cache_key.raw_resume_sha256,
