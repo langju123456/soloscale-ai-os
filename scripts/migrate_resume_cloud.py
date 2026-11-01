@@ -11,6 +11,7 @@ from soloscale.resume_cloud_repository import (
     BASE_SCHEMA_RELATIONS,
     LATEST_SCHEMA_RELATIONS,
     LATEST_SCHEMA_VERSION,
+    RATE_LIMIT_SCHEMA_RELATIONS,
 )
 
 
@@ -28,7 +29,11 @@ def main() -> None:
         existing = set(cur.fetchall())
         if existing - LATEST_SCHEMA_RELATIONS:
             raise SystemExit("refusing database with unrelated user relations")
-        if existing and existing not in (BASE_SCHEMA_RELATIONS, LATEST_SCHEMA_RELATIONS):
+        if existing and existing not in (
+            BASE_SCHEMA_RELATIONS,
+            RATE_LIMIT_SCHEMA_RELATIONS,
+            LATEST_SCHEMA_RELATIONS,
+        ):
             raise SystemExit("refusing incomplete Resume cloud schema")
         if not existing:
             cur.execute((migration_dir / "0001_init.sql").read_text())
@@ -40,10 +45,17 @@ def main() -> None:
                 raise SystemExit("refusing Resume cloud v1 relation/version mismatch")
             cur.execute((migration_dir / "0002_rate_limits.sql").read_text())
             cur.execute("UPDATE resume_cloud_schema_version SET version=2 WHERE version=1")
+            existing = RATE_LIMIT_SCHEMA_RELATIONS
+            versions = [2]
+        if existing == RATE_LIMIT_SCHEMA_RELATIONS:
+            if versions != [2]:
+                raise SystemExit("refusing Resume cloud v2 relation/version mismatch")
+            cur.execute((migration_dir / "0003_result_cache.sql").read_text())
+            cur.execute("UPDATE resume_cloud_schema_version SET version=3 WHERE version=2")
             existing = LATEST_SCHEMA_RELATIONS
             versions = [LATEST_SCHEMA_VERSION]
         if existing != LATEST_SCHEMA_RELATIONS or versions != [LATEST_SCHEMA_VERSION]:
-            raise SystemExit("refusing Resume cloud v2 relation/version mismatch")
+            raise SystemExit("refusing Resume cloud v3 relation/version mismatch")
 
 
 if __name__ == "__main__":

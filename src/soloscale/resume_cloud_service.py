@@ -19,6 +19,11 @@ from soloscale.model_gateway import (
 from soloscale.resume_api import ResumeInput as LocalResumeInput
 from soloscale.resume_api import ResumeRequest as LocalResumeRequest
 from soloscale.resume_api import _decode_resume, _prepare
+from soloscale.resume_cloud_cache import (
+    ResultCacheKey,
+    gateway_cache_identity,
+    generation_pipeline_fingerprint,
+)
 from soloscale.resume_cloud_models import CreateTaskRequest, TaskMode
 from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
 from soloscale.resume_docx import (
@@ -103,7 +108,7 @@ class _LeaseHeartbeat:
                 return
 
 
-def prepare_cloud_input(payload: CreateTaskRequest) -> tuple[bytes, str, str]:
+def prepare_cloud_input(payload: CreateTaskRequest) -> tuple[bytes, str, str, str, str]:
     """Use the canonical bounded parser and normalize non-DOCX uploads before storage."""
     local = LocalResumeRequest(
         resume=LocalResumeInput(
@@ -122,19 +127,33 @@ def prepare_cloud_input(payload: CreateTaskRequest) -> tuple[bytes, str, str]:
         str(payload.approve_external_model_call).encode("ascii"),
     )
     semantic = b"".join(len(item).to_bytes(8, "big") + item for item in fields)
-    return template, jd, hashlib.sha256(semantic).hexdigest()
+    return (
+        template,
+        jd,
+        hashlib.sha256(semantic).hexdigest(),
+        hashlib.sha256(raw).hexdigest(),
+        hashlib.sha256(jd.encode("utf-8")).hexdigest(),
+    )
 
 
 class ResumeCloudService:
-    def __init__(self, repository: ResumeCloudRepository, settings: CloudSettings) -> None:
+    def __init__(
+        self,
+        repository: ResumeCloudRepository,
+        settings: CloudSettings,
+        pipeline_fingerprint: Callable[[], str] = generation_pipeline_fingerprint,
+    ) -> None:
         self.repository = repository
         self.settings = settings
+        self.pipeline_fingerprint = pipeline_fingerprint
         self._model_slots = threading.BoundedSemaphore(settings.max_model_concurrency)
 
     def create(
-        self, payload: CreateTaskRequest, idempotency_key: str, client_id: str
+        self, payload: CreateTaskRequest, idempotency_key: str, client_id: str = "default"
     ) -> tuple[CloudTask, bool]:
-        template, jd, payload_hash = prepare_cloud_input(payload)
+        template, jd, payload_hash, raw_resume_sha256, job_description_sha256 = prepare_cloud_input(
+            payload
+        )
         return self.repository.create_or_replay(
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
@@ -142,6 +161,8 @@ class ResumeCloudService:
             job_description=jd,
             mode=payload.mode,
             approved=payload.approve_external_model_call,
+            raw_resume_sha256=raw_resume_sha256,
+            job_description_sha256=job_description_sha256,
             input_ttl_hours=self.settings.input_ttl_hours,
             client_id=client_id,
             rate_limit_capacity=self.settings.rate_limit_capacity,
@@ -180,6 +201,25 @@ class ResumeCloudService:
             return None
         return gateway
 
+    def _cache_key(self, task: CloudTask, gateway: ModelGateway | None) -> ResultCacheKey | None:
+        if (
+            task.client_key is None
+            or task.raw_resume_sha256 is None
+            or task.job_description_sha256 is None
+        ):
+            return None
+        provider, model, base_url_sha256 = gateway_cache_identity(gateway)
+        return ResultCacheKey(
+            client_key=task.client_key,
+            raw_resume_sha256=task.raw_resume_sha256,
+            job_description_sha256=task.job_description_sha256,
+            mode=task.mode.value,
+            provider=provider,
+            model=model,
+            base_url_sha256=base_url_sha256,
+            pipeline_sha256=self.pipeline_fingerprint(),
+        )
+
     def process_one(self, gateway: ModelGateway | None = None) -> CloudTask | None:
         # A worker process owns this semaphore. Do not claim a task if all pipeline
         # slots are occupied: it remains QUEUED for a later worker loop.
@@ -196,6 +236,11 @@ class ResumeCloudService:
                 and task.worker_token is not None
             )
             if task.mode is TaskMode.TEMPLATE:
+                cache_key = self._cache_key(task, None)
+                if cache_key is not None and self.repository.complete_from_cache(
+                    task.id, task.worker_token, cache_key
+                ):
+                    return self.repository.get(task.id)
                 output = tailor_resume_docx(task.resume_docx, task.job_description).content
             else:
                 if not task.approve_external_model_call:
@@ -203,6 +248,11 @@ class ResumeCloudService:
                 selected_gateway = gateway or self.configured_gateway()
                 if selected_gateway is None:
                     raise RuntimeError("MODEL_NOT_CONFIGURED")
+                cache_key = self._cache_key(task, selected_gateway)
+                if cache_key is not None and self.repository.complete_from_cache(
+                    task.id, task.worker_token, cache_key
+                ):
+                    return self.repository.get(task.id)
                 if not self.repository.mark_model_call(task.id, task.worker_token):
                     raise RuntimeError("TASK_LEASE_LOST")
                 with _LeaseHeartbeat(
@@ -214,7 +264,11 @@ class ResumeCloudService:
                     if heartbeat.lost.is_set():
                         raise RuntimeError("TASK_LEASE_LOST")
             self.repository.complete(
-                task.id, task.worker_token, output, self.settings.output_ttl_hours
+                task.id,
+                task.worker_token,
+                output,
+                self.settings.output_ttl_hours,
+                cache_key,
             )
         except (ResumeTemplateError, RuntimeError):
             if task is not None and task.worker_token is not None:

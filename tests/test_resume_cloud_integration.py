@@ -11,12 +11,19 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 
-from soloscale.model_gateway import ModelGateway
+from soloscale.model_gateway import (
+    GatewayConfigurationState,
+    GatewayDescriptor,
+    GatewayTransportScope,
+    ModelGateway,
+    ModelProviderId,
+)
 from soloscale.resume_cloud_api import create_app
 from soloscale.resume_cloud_models import TaskMode
 from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
@@ -30,7 +37,9 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="requires CLOUD_TEST_DA
 def clean_tasks() -> None:
     assert DATABASE_URL is not None
     with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE resume_cloud_tasks, resume_cloud_rate_limits")
+        cur.execute(
+            "TRUNCATE resume_cloud_tasks, resume_cloud_rate_limits, resume_cloud_result_cache"
+        )
 
 
 def _payload() -> dict[str, object]:
@@ -63,6 +72,22 @@ def _client(settings: CloudSettings | None = None) -> tuple[TestClient, ResumeCl
     return TestClient(create_app(selected)), service
 
 
+def _gateway(model: str = "synthetic") -> ModelGateway:
+    return cast(
+        ModelGateway,
+        SimpleNamespace(
+            descriptor=GatewayDescriptor(
+                provider=ModelProviderId.OPENAI_COMPATIBLE,
+                display_name="Synthetic",
+                configuration_state=GatewayConfigurationState.CONFIGURED,
+                transport_scope=GatewayTransportScope.EXTERNAL,
+                model=model,
+                base_url="https://example.test/v1",
+            )
+        ),
+    )
+
+
 def test_create_idempotency_worker_and_download() -> None:
     client, service = _client()
     headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
@@ -79,6 +104,84 @@ def test_create_idempotency_worker_and_download() -> None:
     output = client.get(f"/tasks/{task_id}/download", headers=headers)
     assert output.status_code == 200 and output.headers["x-soloscale-mode"] == "template-only"
     assert output.headers["x-soloscale-output-sha256"]
+
+
+def test_result_cache_reuses_same_client_without_extending_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service = _client()
+    headers = {"Authorization": "Bearer " + "t" * 32, "X-Client-ID": "alpha"}
+    calls = 0
+
+    def tailor(*_: object) -> object:
+        nonlocal calls
+        calls += 1
+        return type("Result", (), {"content": b"cached-docx"})()
+
+    monkeypatch.setattr("soloscale.resume_cloud_service.tailor_resume_docx", tailor)
+    first = client.post(
+        "/tasks", json=_payload(), headers={**headers, "Idempotency-Key": str(uuid.uuid4())}
+    ).json()["id"]
+    assert client.post(f"/tasks/{first}/process", headers=headers).status_code == 200
+    assert service.process_one() is not None
+    with service.repository._connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT output_expires_at FROM resume_cloud_tasks WHERE id=%s", (first,))
+        original = cur.fetchone()
+        assert original is not None
+        original_expiry = original["output_expires_at"]
+    second = client.post(
+        "/tasks", json=_payload(), headers={**headers, "Idempotency-Key": str(uuid.uuid4())}
+    ).json()["id"]
+    client.post(f"/tasks/{second}/process", headers=headers)
+    reused = service.process_one()
+    assert calls == 1 and reused is not None and reused.state.value == "SUCCEEDED"
+    with service.repository._connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT output_expires_at FROM resume_cloud_tasks WHERE id=%s", (second,))
+        reused_expiry = cur.fetchone()
+        assert reused_expiry is not None
+        assert reused_expiry["output_expires_at"] == original_expiry
+
+
+def test_result_cache_does_not_cross_client_or_survive_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service = _client()
+    headers = {"Authorization": "Bearer " + "t" * 32, "X-Client-ID": "alpha"}
+    calls = 0
+
+    def tailor(*_: object) -> object:
+        nonlocal calls
+        calls += 1
+        return type("Result", (), {"content": b"cached-docx"})()
+
+    monkeypatch.setattr("soloscale.resume_cloud_service.tailor_resume_docx", tailor)
+    first = client.post(
+        "/tasks", json=_payload(), headers={**headers, "Idempotency-Key": str(uuid.uuid4())}
+    ).json()["id"]
+    client.post(f"/tasks/{first}/process", headers=headers)
+    assert service.process_one() is not None
+    with service.repository._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE resume_cloud_result_cache SET output_expires_at=now() - interval '1 second'"
+        )
+    other_headers = {**headers, "X-Client-ID": "beta", "Idempotency-Key": str(uuid.uuid4())}
+    other = client.post("/tasks", json=_payload(), headers=other_headers).json()["id"]
+    client.post(f"/tasks/{other}/process", headers=other_headers)
+    assert service.process_one() is not None and calls == 2
+    service.repository.recover_and_cleanup()
+    with service.repository._connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS count FROM resume_cloud_result_cache")
+        assert cur.fetchone() == {"count": 1}
+
+
+def test_cross_client_idempotency_replay_is_conflict() -> None:
+    client, _ = _client()
+    key = str(uuid.uuid4())
+    auth = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": key}
+    alpha = client.post("/tasks", json=_payload(), headers={**auth, "X-Client-ID": "alpha"})
+    beta = client.post("/tasks", json=_payload(), headers={**auth, "X-Client-ID": "beta"})
+    assert alpha.status_code == 201
+    assert beta.status_code == 409
 
 
 def test_auth_and_two_claims_are_bounded() -> None:
@@ -414,7 +517,7 @@ def test_migrator_refuses_relation_in_other_schema(relation_sql: str) -> None:
     assert result.returncode != 0
 
 
-def test_migrator_rerun_accepts_exact_v2_schema() -> None:
+def test_migrator_rerun_accepts_exact_v3_schema() -> None:
     assert DATABASE_URL is not None
     result = subprocess.run(
         [sys.executable, Path(__file__).parents[1] / "scripts" / "migrate_resume_cloud.py"],
@@ -426,7 +529,7 @@ def test_migrator_rerun_accepts_exact_v2_schema() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_migrator_refuses_v2_relations_with_v1_version() -> None:
+def test_migrator_refuses_v3_relations_with_v1_version() -> None:
     assert DATABASE_URL is not None
     with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -445,10 +548,10 @@ def test_migrator_refuses_v2_relations_with_v1_version() -> None:
         assert result.returncode != 0
     finally:
         with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=2")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=3")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3))"
             )
 
 
@@ -466,10 +569,10 @@ def test_ready_requires_latest_schema_version() -> None:
         assert not repository.ready()
     finally:
         with repository._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=2")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=3")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3))"
             )
 
 
@@ -491,7 +594,7 @@ def test_ai_failure_records_one_attempt_without_fallback(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         "soloscale.resume_cloud_service.tailor_resume_docx_with_gateway", failing_gateway
     )
-    assert service.process_one(gateway=cast(ModelGateway, object())) is not None
+    assert service.process_one(gateway=_gateway()) is not None
     task = service.repository.get(task_id)
     assert calls == 1 and task is not None and task.model_call_attempted
     assert task.state.value == "FAILED"
@@ -517,5 +620,5 @@ def test_stale_ai_recovery_never_invokes_gateway(monkeypatch: pytest.MonkeyPatch
         "soloscale.resume_cloud_service.tailor_resume_docx_with_gateway",
         lambda *_args, **_kwargs: pytest.fail("stale task must not invoke gateway"),
     )
-    assert service.process_one(gateway=cast(ModelGateway, object())) is None
+    assert service.process_one(gateway=_gateway()) is None
     assert service.repository.get(task_id).state.value == "NEEDS_REVIEW"  # type: ignore[union-attr]
