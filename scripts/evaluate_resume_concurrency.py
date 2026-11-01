@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Disposable, fake-gateway concurrency evaluation for Resume Cloud.
+"""Real local PostgreSQL/HTTP/process evidence with a synthetic ModelGateway.
 
-This never starts containers or touches a non-empty database.  It is deliberately a
-harness: production provider selection and source are not changed.
+Only a fresh loopback resume_service_eval database is accepted. Start PostgreSQL
+with compose.resume-cloud.yaml; this command owns only its API/worker children.
 """
 
 from __future__ import annotations
@@ -11,77 +11,220 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
+import platform
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from statistics import quantiles
-from typing import Any, cast
-from urllib.parse import urlsplit
+from typing import Any, TypeVar
 
 import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
+from soloscale.evidence_agent import _NoRedirectHandler
 from soloscale.model_gateway import (
     GatewayConfigurationState,
     GatewayDescriptor,
+    GatewayErrorCategory,
+    GatewayFailureDetails,
     GatewayTransportScope,
-    ModelGateway,
+    ModelCallProfile,
+    ModelGatewayTimeoutError,
     ModelProviderId,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / ".soloscale" / "resume-concurrency-evals"
+TERMINAL = {"SUCCEEDED", "FAILED", "NEEDS_REVIEW"}
+ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
-class EvaluationError(ValueError):
-    pass
+class EvaluationError(RuntimeError):
+    """Messages are fixed diagnostics, never connection or request content."""
 
 
 def safe_loopback_dsn(dsn: str) -> bool:
     try:
-        p = urlsplit(dsn)
+        parsed = urllib.parse.urlsplit(dsn)
         return (
-            p.scheme in {"postgres", "postgresql"}
-            and p.hostname in {"127.0.0.1", "::1"}
-            and not p.query
-            and not p.fragment
-            and re.fullmatch(r"/resume_service_eval(?:_[A-Za-z0-9]+)?", p.path or "") is not None
+            parsed.scheme in {"postgres", "postgresql"}
+            and parsed.hostname in {"127.0.0.1", "::1"}
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+            and not parsed.query
+            and not parsed.fragment
+            and re.fullmatch(r"/resume_service_eval(?:_[A-Za-z0-9]+)?", parsed.path) is not None
         )
     except ValueError:
         return False
 
 
 def empty_database(dsn: str) -> bool:
-    with psycopg.connect(dsn, connect_timeout=3) as c:
-        r = c.execute(
-            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-            "WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema' "
-            "AND c.relkind IN ('r','p','v','m','S','f')"
-        ).fetchone()
-        return bool(r and r[0] == 0)
+    with psycopg.connect(dsn, connect_timeout=3) as connection:
+        row = connection.execute("""SELECT count(*) FROM pg_class c
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+              AND c.relkind IN ('r','p','v','m','S','f')""").fetchone()
+        return row is not None and row[0] == 0
 
 
-def private_dir(p: Path) -> None:
-    if p.is_symlink() or (p.exists() and not p.is_dir()):
-        raise EvaluationError("unsafe evaluation directory")
-    p.mkdir(parents=True, mode=0o700, exist_ok=False)
-    p.chmod(0o700)
+def write_json(path: Path, value: object) -> None:
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    with temporary.open("x", encoding="utf-8") as handle:
+        temporary.chmod(0o600)
+        json.dump(value, handle, indent=2, sort_keys=True, default=str)
+        handle.write("\n")
+    temporary.replace(path)
 
 
-def write_json(p: Path, value: object) -> None:
-    p.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    p.chmod(0o600)
+def payload(index: int) -> dict[str, object]:
+    text = f"""Synthetic Candidate {index}
+AI Engineer
+PROJECT HIGHLIGHTS
+Synthetic project {index}
+- Built a Python retrieval system.
+TECHNICAL SKILLS
+- Python, Docker
+WORK EXPERIENCE
+Synthetic company
+- Delivered bounded software.
+"""
+    return {
+        "resume": {
+            "filename": "synthetic.txt",
+            "content_base64": base64.b64encode(text.encode()).decode(),
+        },
+        "job_description": f"Python and Docker engineering role. Synthetic role {index}.",
+        "mode": "ai",
+        "approve_external_model_call": True,
+    }
+
+
+class FakeGateway:
+    """The real pipeline supplies and validates its own dynamically typed schema."""
+
+    last_call_profile: ModelCallProfile | None = None
+
+    def __init__(
+        self, audit: Path, delay: float, error_rate: float, seed: int, control: Path | None = None
+    ) -> None:
+        self.descriptor = GatewayDescriptor(
+            provider=ModelProviderId.OPENAI_COMPATIBLE,
+            display_name="Synthetic evaluation",
+            configuration_state=GatewayConfigurationState.CONFIGURED,
+            transport_scope=GatewayTransportScope.EXTERNAL,
+            model="fake-v1",
+            base_url="https://example.test/v1",
+        )
+        self.audit, self.delay, self.error_rate, self.seed = audit, delay, error_rate, seed
+        self.control = control
+        self.lock = threading.Lock()
+        self.calls = 0
+
+    def complete(
+        self, schema: type[ResponseT], *, system: str, user: str, reasoning_effort: str = "none"
+    ) -> ResponseT:
+        del system, reasoning_effort
+        started = time.monotonic_ns()
+        category: str | None = None
+        with self.lock:
+            self.calls += 1
+            ordinal = self.calls
+        phase = "batch"
+        try:
+            if self.control is not None:
+                phase = str(json.loads(self.control.read_text())["phase"])
+            request = json.loads(user)
+            candidate = request["candidate_profile"]
+            # Stable across worker scheduling and random payload request IDs.
+            digest = hashlib.sha256(f"{self.seed}:{request['job_description']}".encode()).digest()
+            fails = phase == "batch" and int.from_bytes(digest[:8], "big") / 2**64 < self.error_rate
+            time.sleep(self.delay)
+            if fails:
+                category = GatewayErrorCategory.TIMEOUT.value
+                raise ModelGatewayTimeoutError(
+                    "synthetic timeout",
+                    details=GatewayFailureDetails(
+                        correlation_id="gateway-" + uuid.uuid4().hex[:24],
+                        model="fake-v1",
+                        category=GatewayErrorCategory.TIMEOUT,
+                        retryable=True,
+                        duration_ms=int((time.monotonic_ns() - started) / 1_000_000),
+                    ),
+                )
+            entries = candidate["entries"]
+            ids = [entry["profile_entry_id"] for entry in entries]
+            facts: dict[str, str] = {}
+            for fact in candidate["atomic_facts"]:
+                facts.setdefault(fact["profile_entry_id"], fact["fact_id"])
+            wanted = request.get("requested_edit_profile_entry_ids", ids)
+            return schema.model_validate(
+                {
+                    "role_summary": "Preserve approved engineering facts.",
+                    "evidence_priority": ids,
+                    "skill_priority": [
+                        f"SKILL-{i:02d}" for i in range(1, len(candidate["skills"]) + 1)
+                    ],
+                    "bullet_rewrites": {
+                        entry["profile_entry_id"]: {
+                            "kind": "REWRITE",
+                            "text": entry["text"],
+                            "target_fact_id": facts[entry["profile_entry_id"]],
+                            "supporting_fact_ids": [],
+                        }
+                        for entry in entries
+                        if entry["profile_entry_id"] in wanted
+                    },
+                    "summary_rewrite": None,
+                    "unsupported_requirements": [],
+                    "rewrite_guidance": "Preserve approved facts.",
+                }
+            )
+        except Exception:
+            category = category or "fake_contract_error"
+            raise
+        finally:
+            ended = time.monotonic_ns()
+            with self.lock:
+                with self.audit.open("a", encoding="utf-8") as handle:
+                    self.audit.chmod(0o600)
+                    handle.write(
+                        json.dumps(
+                            {
+                                "ordinal": ordinal,
+                                "pid": os.getpid(),
+                                "phase": phase,
+                                "start_ns": started,
+                                "end_ns": ended,
+                                "duration_seconds": (ended - started) / 1e9,
+                                "error_category": category,
+                            }
+                        )
+                        + "\n"
+                    )
+
+
+@dataclass(frozen=True)
+class Reply:
+    status: int
+    task_id: str | None
+    retry_after: str | None
+    elapsed: float
 
 
 def request(
@@ -89,145 +232,121 @@ def request(
     token: str,
     method: str,
     path: str,
-    payload: object | None = None,
+    body: object | None = None,
     key: str | None = None,
     client: str | None = None,
-) -> tuple[int, dict[str, str], dict[str, Any]]:
-    body = None if payload is None else json.dumps(payload).encode()
-    r = urllib.request.Request(url + path, data=body, method=method)
-    r.add_header("Authorization", "Bearer " + token)
-    if body:
-        r.add_header("Content-Type", "application/json")
-    if key:
-        r.add_header("Idempotency-Key", key)
+) -> Reply:
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username
+        or parsed.password
+    ):
+        raise EvaluationError("HTTP target must be a loopback origin")
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + token)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if key is not None:
+        req.add_header("Idempotency-Key", key)
     if client is not None:
-        r.add_header("X-Client-ID", client)
+        req.add_header("X-Client-ID", client)
+    started = time.monotonic()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
     try:
-        h = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(r, timeout=10)
-    except urllib.error.HTTPError as e:
-        h = e
-    with h:
-        return h.status, {k.lower(): v for k, v in h.headers.items()}, json.loads(h.read() or b"{}")
-
-
-def payload(i: int) -> dict[str, object]:
-    text = f"Candidate {i}\nEXPERIENCE\n- Built Python service {i}.\nSKILLS\n- Python\n"
-    return {
-        "resume": {
-            "filename": "synthetic.txt",
-            "content_base64": base64.b64encode(text.encode()).decode(),
-        },
-        "job_description": f"Python role {i}",
-        "mode": "ai",
-        "approve_external_model_call": True,
-    }
-
-
-class FakeGateway:
-    def __init__(self, audit: Path, delay: float, error_rate: float, seed: int) -> None:
-        self.descriptor = GatewayDescriptor(
-            provider=ModelProviderId.OPENAI_COMPATIBLE,
-            display_name="Evaluation fake",
-            configuration_state=GatewayConfigurationState.CONFIGURED,
-            transport_scope=GatewayTransportScope.EXTERNAL,
-            model="fake",
-            base_url="https://example.test/v1",
+        response = opener.open(req, timeout=20)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        content = response.read(1_000_001)
+        if len(content) > 1_000_000:
+            raise EvaluationError("HTTP response exceeded budget")
+        decoded = json.loads(content or b"{}")
+        return Reply(
+            response.status,
+            decoded.get("id"),
+            response.headers.get("Retry-After"),
+            time.monotonic() - started,
         )
-        self.audit, self.delay, self.error_rate, self.seed = audit, delay, error_rate, seed
-        self.lock = threading.Lock()
-        self.calls = 0
-        self.last_call_profile = None
 
-    def complete(
-        self, schema: type[BaseModel], *, system: str, user: str, reasoning_effort: str = "none"
-    ) -> BaseModel:
-        p = json.loads(user)
-        entries = p["candidate_profile"]
-        ids = [x["profile_entry_id"] for x in entries]
-        facts = p["atomic_facts"]
-        with self.lock:
-            self.calls += 1
-            ordinal = self.calls
-        start = time.monotonic_ns()
-        bad = ((self.seed + ordinal) * 1103515245 + 12345) % 10000 < int(self.error_rate * 10000)
-        time.sleep(self.delay)
-        end = time.monotonic_ns()
-        rec = {
-            "ordinal": ordinal,
-            "pid": os.getpid(),
-            "start_monotonic_ns": start,
-            "end_monotonic_ns": end,
-            "walltime_ns": end - start,
-            "errorcategory": "TIMEOUT" if bad else None,
-        }
-        with self.lock:
-            with self.audit.open("a", encoding="utf-8") as h:
-                h.write(json.dumps(rec, separators=(",", ":")) + "\n")
-        if bad:
-            raise RuntimeError("evaluation fake failure")
-        wanted = p.get("requested_edit_profile_entry_ids", ids)
-        by = {f["profile_entry_id"]: f["fact_id"] for f in facts}
-        return schema.model_validate(
-            {
-                "role_summary": "Python engineering role.",
-                "evidence_priority": ids,
-                "skill_priority": [f"SKILL-{i + 1:02d}" for i in range(len(ids))],
-                "bullet_rewrites": {
-                    e["profile_entry_id"]: {
-                        "kind": "REWRITE",
-                        "text": e["text"],
-                        "target_fact_id": by[e["profile_entry_id"]],
-                        "supporting_fact_ids": [],
-                    }
-                    for e in entries
-                    if e["profile_entry_id"] in wanted
-                },
-                "summary_rewrite": None,
-                "unsupported_requirements": [],
-                "rewrite_guidance": "Preserve source facts.",
-            }
-        )
+
+def wait_until(predicate: Callable[[], bool], timeout: float, category: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.025)
+    raise EvaluationError(category)
 
 
 def worker_child(args: argparse.Namespace) -> None:
+    from soloscale.resume_cloud_observability import Telemetry
     from soloscale.resume_cloud_repository import ResumeCloudRepository
     from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService
 
-    audit = Path(args.audit)
+    run_dir = Path(args.run_dir)
     service = ResumeCloudService(
         ResumeCloudRepository(args.dsn),
         CloudSettings(
-            database_url=args.dsn, bearer_token="x" * 32, max_model_concurrency=args.threads
+            database_url=args.dsn,
+            bearer_token="x" * 32,
+            max_model_concurrency=args.threads,
         ),
+        telemetry=Telemetry(),
     )
-    fake = cast(
-        ModelGateway, FakeGateway(audit, args.delay, args.error_rate, args.seed + os.getpid())
+    fake = FakeGateway(
+        run_dir / f"calls-{args.worker_index}.jsonl",
+        args.delay,
+        args.error_rate,
+        args.seed,
+        run_dir / "control.json",
     )
+    (run_dir / f"ready-{args.worker_index}").touch(mode=0o600)
+    wait_until(lambda: (run_dir / "start").exists(), args.timeout, "worker_start_timeout")
 
-    def one(_: int) -> int:
-        done = 0
-        while service.process_one(fake) is not None:
-            done += 1
-        return done
+    def consume(_: int) -> int:
+        count = 0
+        while not (run_dir / "stop").exists():
+            if service.process_one(fake) is None:
+                time.sleep(0.01)
+            else:
+                count += 1
+        return count
 
-    with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        print(sum(pool.map(one, range(args.threads))))
+    try:
+        with ThreadPoolExecutor(max_workers=args.threads) as pool:
+            processed = sum(pool.map(consume, range(args.threads)))
+        metrics = getattr(service.telemetry, "metrics", None)
+        write_json(
+            run_dir / f"worker-{args.worker_index}.json",
+            {
+                "pid": os.getpid(),
+                "processed": processed,
+                "metrics": metrics.snapshot() if metrics is not None else None,
+            },
+        )
+    finally:
+        service.telemetry.shutdown()
 
 
 def api_child(args: argparse.Namespace) -> None:
     import uvicorn
 
     from soloscale.resume_cloud_api import create_app
+    from soloscale.resume_cloud_observability import Telemetry
     from soloscale.resume_cloud_service import CloudSettings
 
     uvicorn.run(
         create_app(
             CloudSettings(
                 database_url=args.dsn,
-                bearer_token=args.token,
+                bearer_token=os.environ["RESUME_CLOUD_BEARER_TOKEN"],
                 rate_limit_capacity=args.capacity,
                 rate_limit_refill_per_second=args.refill,
-            )
+            ),
+            telemetry=Telemetry(),
         ),
         host="127.0.0.1",
         port=args.port,
@@ -237,87 +356,213 @@ def api_child(args: argparse.Namespace) -> None:
 
 
 def source() -> dict[str, object]:
-    paths = (
-        "scripts/evaluate_resume_concurrency.py",
-        "src/soloscale/resume_cloud_service.py",
-        "src/soloscale/resume_cloud_repository.py",
+    paths = sorted(
+        {
+            Path(__file__),
+            *ROOT.glob("src/soloscale/resume_*.py"),
+            ROOT / "src/soloscale/model_gateway.py",
+            *ROOT.glob("migrations/resume_cloud/*.sql"),
+        }
     )
     return {
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "dirty_hash": hashlib.sha256(
-            subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)
-        ).hexdigest(),
-        "hashes": {x: hashlib.sha256((ROOT / x).read_bytes()).hexdigest() for x in paths},
+        "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+        "hashes": {
+            str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in paths
+        },
+        "python": platform.python_version(),
+        "platform": platform.platform(),
     }
 
 
-def percentile(xs: list[float], p: float) -> float | None:
-    if not xs:
-        return None
-    return sorted(xs)[-1] if len(xs) == 1 else quantiles(xs, n=100, method="inclusive")[p - 1]
+def read_calls(run_dir: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for path in sorted(run_dir.glob("calls-*.jsonl"))
+        for line in path.read_text().splitlines()
+        if line
+    ]
 
 
-def run(args: argparse.Namespace) -> dict[str, object]:
+def peak(calls: list[dict[str, Any]]) -> int:
+    events = [(call["start_ns"], 1) for call in calls] + [(call["end_ns"], -1) for call in calls]
+    active = maximum = 0
+    for _, delta in sorted(events):  # End before start for equal timestamps: half-open intervals.
+        active += delta
+        maximum = max(maximum, active)
+    return maximum
+
+
+def distribution(values: list[float]) -> dict[str, float | int | None]:
+    ordered = sorted(values)
+
+    def quantile(q: float) -> float | None:
+        if not ordered:
+            return None
+        position = (len(ordered) - 1) * q
+        lower = math.floor(position)
+        return ordered[lower] + (ordered[math.ceil(position)] - ordered[lower]) * (position - lower)
+
+    return {
+        "count": len(values),
+        "p50": quantile(0.5),
+        "p95": quantile(0.95),
+        "max": max(values, default=None),
+    }
+
+
+def rows(dsn: str) -> list[dict[str, Any]]:
+    with psycopg.connect(dsn, row_factory=dict_row) as connection:
+        return list(
+            connection.execute("""SELECT id::text, state, attempt_count, model_call_attempted,
+            output_sha256, output_expires_at::text,
+            EXTRACT(EPOCH FROM(completed_at-created_at))::float AS latency,
+            EXTRACT(EPOCH FROM(started_at-
+                (to_jsonb(t)->>'queued_at')::timestamptz))::float AS queue_wait
+            FROM resume_cloud_tasks t""").fetchall()
+        )
+
+
+def install_audit(dsn: str) -> None:
+    # Evaluation-only schema, after migration; production public schema stays exact.
+    with psycopg.connect(dsn) as connection:
+        connection.execute("""CREATE SCHEMA evaluation;
+            CREATE TABLE evaluation.terminal_events(
+                task_id UUID, state TEXT, observed_at TIMESTAMPTZ DEFAULT clock_timestamp());
+            CREATE FUNCTION evaluation.audit_terminal() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.state IN ('SUCCEEDED','FAILED','NEEDS_REVIEW') AND
+                   (OLD.state IS DISTINCT FROM NEW.state OR
+                    OLD.completed_at IS DISTINCT FROM NEW.completed_at) THEN
+                    INSERT INTO evaluation.terminal_events(task_id,state) VALUES(NEW.id,NEW.state);
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER evaluation_terminal AFTER UPDATE ON resume_cloud_tasks
+            FOR EACH ROW EXECUTE FUNCTION evaluation.audit_terminal();""")
+
+
+def render_report(report: dict[str, Any]) -> str:
+    lines = [
+        "# Resume Cloud concurrency evaluation",
+        "",
+        f"Status: **{report['status']}**",
+        "",
+        (
+            "Measured local synthetic workload; no paid model, provider HTTP/TLS, "
+            "or production capacity claim."
+        ),
+        "",
+        f"Source: `{report['source']['head']}`; dirty: `{report['source']['dirty']}`.",
+        "",
+        "| Measurement | Observed value |",
+        "|---|---|",
+    ]
+    for section in ("config", "requests", "tasks", "model", "cache"):
+        for name, value in report.get(section, {}).items():
+            lines.append(f"| {section}.{name} | `{json.dumps(value, sort_keys=True)}` |")
+    lines.extend(["", "| Assertion | Result |", "|---|---|"])
+    lines.extend(f"| {name} | {passed} |" for name, passed in report["assertions"].items())
+    lines.extend(
+        [
+            "",
+            "Full source hashes, runtime, timings and process evidence are in report.json.",
+            "Batch failures are seeded by JD hash. Cache control calls use error rate 0.",
+            "The terminal audit trigger exists only in this disposable evaluation database.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def evidence_is_private(run_dir: Path, token: str) -> bool:
+    forbidden = [
+        "Synthetic Candidate",
+        "Built a Python retrieval system.",
+        "Python and Docker engineering role.",
+        "U3ludGhldGljIENh",
+        token,
+        os.environ.get("PGPASSWORD", ""),
+    ]
+    needles = [value.encode() for value in forbidden if len(value) >= 8]
+    return all(
+        not any(needle in path.read_bytes() for needle in needles)
+        for path in run_dir.iterdir()
+        if path.is_file() and path.suffix in {".json", ".jsonl", ".log", ".md"}
+    )
+
+
+def run(args: argparse.Namespace) -> tuple[Path, bool]:
     if not safe_loopback_dsn(args.dsn):
-        raise EvaluationError("DSN must be loopback resume_service_eval database")
+        raise EvaluationError("DSN must be a loopback resume_service_eval database")
     if not empty_database(args.dsn):
         raise EvaluationError("refusing non-empty evaluation database")
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
-    out = OUT / stamp
-    OUT.mkdir(mode=0o700, exist_ok=True)
-    OUT.chmod(0o700)
-    private_dir(out)
+    for directory in (ROOT / ".soloscale", OUT):
+        if directory.is_symlink():
+            raise EvaluationError("unsafe output directory")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    run_dir = OUT / (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12])
+    run_dir.mkdir(mode=0o700)
     token = secrets.token_hex(24)
-    audit = out / "fake-audit.jsonl"
-    audit.touch(mode=0o600)
-    report = {
+    report: dict[str, Any] = {
         "status": "INCOMPLETE",
-        "config": {
-            "workers": args.workers,
-            "threads": args.threads,
-            "delay_seconds": args.delay,
-            "error_rate": args.error_rate,
-            "seed": args.seed,
-        },
         "source": source(),
+        "started_at": datetime.now(UTC).isoformat(),
+        "config": {
+            key: getattr(args, key)
+            for key in (
+                "tasks",
+                "clients",
+                "workers",
+                "threads",
+                "delay",
+                "error_rate",
+                "seed",
+                "capacity",
+                "refill",
+            )
+        },
         "assertions": {},
     }
-    env = {
-        **os.environ,
-        "RESUME_CLOUD_DATABASE_URL": args.dsn,
-        "RESUME_CLOUD_BEARER_TOKEN": token,
-        "RESUME_CLOUD_OPENAI_API_KEY": "",
-        "RESUME_CLOUD_DEEPSEEK_API_KEY": "",
-    }
-    subprocess.run(
-        [sys.executable, "scripts/migrate_resume_cloud.py"],
-        cwd=ROOT,
-        env=env,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    write_json(run_dir / "report.json", report)
+    write_json(run_dir / "control.json", {"phase": "batch"})
+    env = dict(
+        os.environ,
+        RESUME_CLOUD_DATABASE_URL=args.dsn,
+        RESUME_CLOUD_BEARER_TOKEN=token,
+        RESUME_CLOUD_TRACING="false",
+        RESUME_CLOUD_MODEL_PROVIDER="",
+        RESUME_CLOUD_MODEL="",
+        RESUME_CLOUD_OPENAI_API_KEY="",
+        RESUME_CLOUD_DEEPSEEK_API_KEY="",
     )
-    ports = []
-    apis = []
-    import socket
-
+    processes: list[subprocess.Popen[bytes]] = []
+    workers: list[subprocess.Popen[bytes]] = []
+    started = time.monotonic()
     try:
+        subprocess.run(
+            [sys.executable, "scripts/migrate_resume_cloud.py"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        install_audit(args.dsn)
+        urls: list[str] = []
         for _ in range(2):
-            s = socket.socket()
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            s.close()
-            ports.append(port)
-            apis.append(
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            urls.append(f"http://127.0.0.1:{port}")
+            processes.append(
                 subprocess.Popen(
                     [
                         sys.executable,
-                        str(Path(__file__).resolve()),
-                        "--api-child",
-                        "--dsn",
-                        args.dsn,
-                        "--token",
-                        token,
+                        str(Path(__file__)),
+                        "--child",
+                        "api",
                         "--port",
                         str(port),
                         "--capacity",
@@ -331,58 +576,93 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     stderr=subprocess.DEVNULL,
                 )
             )
-        urls = [f"http://127.0.0.1:{p}" for p in ports]
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
+
+        def ready() -> bool:
             try:
-                if all(request(u, token, "GET", "/health/ready")[0] == 200 for u in urls):
-                    break
+                return all(
+                    request(url, token, "GET", "/health/ready").status == 200 for url in urls
+                )
             except OSError:
-                pass
-            time.sleep(0.1)
-        else:
-            raise EvaluationError("API readiness timeout")
-        statuses = []
-        ids = []
-        for i in range(args.tasks):
-            key = f"eval-{i}-{uuid.uuid4().hex}"
-            st, _, body = request(urls[i % 2], token, "POST", "/tasks", payload(i), key, "alpha")
-            statuses.append(st)
-            ids.append(body.get("id"))
-            request(urls[i % 2], token, "POST", f"/tasks/{ids[-1]}/process")
-        same = "same-" + uuid.uuid4().hex
-        a = request(urls[0], token, "POST", "/tasks", payload(999), same, "beta")
-        b = request(urls[1], token, "POST", "/tasks", payload(999), same, "beta")
-        conflict = request(urls[0], token, "POST", "/tasks", payload(998), same, "beta")
-        burst = [
-            request(
-                urls[i % 2],
+                return False
+
+        wait_until(ready, args.timeout, "api_readiness_timeout")
+        responses: list[Reply] = []
+        specs = [
+            (payload(i), f"task-{i}-{uuid.uuid4().hex}", f"client-{i % args.clients}")
+            for i in range(args.tasks)
+        ]
+        jobs = [(index, retry) for index in range(args.tasks) for retry in range(3)]
+
+        def submit(job: tuple[int, int]) -> Reply:
+            index, retry = job
+            body, key, client = specs[index]
+            return request(urls[(index + retry) % 2], token, "POST", "/tasks", body, key, client)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = list(pool.map(submit, jobs))
+        ids: set[str] = {reply.task_id for reply in responses if reply.task_id is not None}
+        observed_replays = sum(reply.status == 201 for reply in responses) - len(ids)
+        checks = report["assertions"]
+        checks["concurrent_replays_one_task_per_key"] = (
+            all(
+                all(reply.status == 201 for reply in responses[i * 3 : i * 3 + 3])
+                and len({reply.task_id for reply in responses[i * 3 : i * 3 + 3]}) == 1
+                for i in range(args.tasks)
+            )
+            and len(ids) == args.tasks
+        )
+        conflict = request(
+            urls[1], token, "POST", "/tasks", payload(99999), specs[0][1], specs[0][2]
+        )
+        checks["different_payload_conflicts"] = conflict.status == 409
+        burst_started = time.monotonic()
+
+        def burst_submit(index: int) -> Reply:
+            return request(
+                urls[index % 2],
                 token,
                 "POST",
                 "/tasks",
-                payload(2000 + i),
-                "burst-" + uuid.uuid4().hex,
-                "rate",
-            )[0]
-            for i in range(args.capacity + 2)
-        ]
-        report["requests"] = {
-            "create_statuses": statuses,
-            "same_key_ids": [a[2].get("id"), b[2].get("id")],
-            "conflict_status": conflict[0],
-            "rate_statuses": burst,
-            "retry_after_present": any(s == 429 for s in burst),
-        }
-        workers = [
-            subprocess.Popen(
+                payload(10000 + index),
+                f"burst-{index}-{uuid.uuid4().hex}",
+                "burst",
+            )
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            burst = list(pool.map(burst_submit, range(args.capacity + 8)))
+        burst_seconds = time.monotonic() - burst_started
+        ids.update(reply.task_id for reply in burst if reply.task_id is not None)
+        checks["rate_limit_and_retry_after"] = any(reply.status == 429 for reply in burst) and all(
+            reply.retry_after is not None
+            and reply.retry_after.isdigit()
+            and int(reply.retry_after) >= 1
+            for reply in burst
+            if reply.status == 429
+        )
+        checks["shared_api_bucket"] = sum(
+            reply.status == 201 for reply in burst
+        ) <= args.capacity + math.floor(burst_seconds * args.refill)
+        checks["only_expected_http_statuses"] = all(reply.status in {201, 429} for reply in burst)
+        responses += burst + [conflict]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            queued = list(
+                pool.map(
+                    lambda task_id: request(urls[0], token, "POST", f"/tasks/{task_id}/process"),
+                    ids,
+                )
+            )
+        checks["all_accepted_tasks_queued"] = all(reply.status == 200 for reply in queued)
+        for index in range(args.workers):
+            worker = subprocess.Popen(
                 [
                     sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--worker-child",
-                    "--dsn",
-                    args.dsn,
-                    "--audit",
-                    str(audit),
+                    str(Path(__file__)),
+                    "--child",
+                    "worker",
+                    "--worker-index",
+                    str(index),
+                    "--run-dir",
+                    str(run_dir),
                     "--threads",
                     str(args.threads),
                     "--delay",
@@ -391,122 +671,244 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     str(args.error_rate),
                     "--seed",
                     str(args.seed),
+                    "--timeout",
+                    str(args.timeout),
                 ],
                 cwd=ROOT,
                 env=env,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                text=True,
             )
-            for _ in range(args.workers)
-        ]
-        exits = [p.wait(timeout=args.timeout) for p in workers]
-        with psycopg.connect(args.dsn, row_factory=dict_row) as c:
-            rows = list(
-            c.execute(
-                "SELECT id::text,state,attempt_count,model_call_attempted,output_sha256,"
-                "output_expires_at,EXTRACT(EPOCH FROM(completed_at-created_at)) latency "
-                "FROM resume_cloud_tasks"
-            ).fetchall()
-            )
-        calls = [json.loads(x) for x in audit.read_text().splitlines() if x]
-        active = {}
-        peaks = {}
-        for e in sorted(calls, key=lambda x: x["start_monotonic_ns"]):
-            pid = e["pid"]
-            active.setdefault(pid, []).append((e["start_monotonic_ns"], 1))
-            active[pid].append((e["end_monotonic_ns"], -1))
-        for pid, events in active.items():
-            n = 0
-            peaks[str(pid)] = max(
-                (n := n + d for _, d in sorted(events, key=lambda x: (x[0], x[1]))), default=0
-            )
-        all_ok = all(
-            r["state"] == ("FAILED" if args.error_rate else "SUCCEEDED") and r["attempt_count"] == 1
-            for r in rows
-            if r["id"] in ids
+            workers.append(worker)
+            processes.append(worker)
+        wait_until(
+            lambda: all((run_dir / f"ready-{i}").exists() for i in range(args.workers)),
+            args.timeout,
+            "worker_readiness_timeout",
         )
+        (run_dir / "start").touch(mode=0o600)
+        wait_until(
+            lambda: all(row["state"] in TERMINAL for row in rows(args.dsn)),
+            args.timeout,
+            "batch_terminal_timeout",
+        )
+        batch_rows = rows(args.dsn)
+        batch_calls = read_calls(run_dir)
+        successful = {row["id"] for row in batch_rows if row["state"] == "SUCCEEDED"}
+        candidates = [
+            (i, responses[i * 3].task_id)
+            for i in range(args.tasks)
+            if responses[i * 3].task_id in successful
+        ]
+        if not candidates:
+            raise EvaluationError("no_successful_cache_source")
+        source_index, source_id = candidates[0]
+        original = next(row for row in batch_rows if row["id"] == source_id)
+        write_json(run_dir / "control.json", {"phase": "cache_control"})
+        body, _, client = specs[source_index]
+
+        def cache_task(partition: str) -> dict[str, Any]:
+            reply = request(urls[1], token, "POST", "/tasks", body, uuid.uuid4().hex, partition)
+            responses.append(reply)
+            if reply.status != 201 or reply.task_id is None:
+                raise EvaluationError("cache_task_not_created")
+            request(urls[1], token, "POST", f"/tasks/{reply.task_id}/process")
+            wait_until(
+                lambda: any(
+                    row["id"] == reply.task_id and row["state"] in TERMINAL
+                    for row in rows(args.dsn)
+                ),
+                args.timeout,
+                "cache_terminal_timeout",
+            )
+            return next(row for row in rows(args.dsn) if row["id"] == reply.task_id)
+
+        before = len(read_calls(run_dir))
+        cached = cache_task(client)
+        after_hit = len(read_calls(run_dir))
+        other = cache_task("cache-other-client")
+        after_other = len(read_calls(run_dir))
+        checks["cache_hit_zero_model_calls"] = (
+            cached["state"] == "SUCCEEDED"
+            and not cached["model_call_attempted"]
+            and after_hit == before
+        )
+        checks["cache_preserves_output_and_expiry"] = (
+            cached["output_sha256"] == original["output_sha256"]
+            and cached["output_expires_at"] == original["output_expires_at"]
+        )
+        checks["cross_client_cache_miss"] = (
+            other["state"] == "SUCCEEDED"
+            and other["model_call_attempted"]
+            and after_other - after_hit == 1
+        )
+        report["cache"] = {
+            "same_client_call_delta": after_hit - before,
+            "other_client_call_delta": after_other - after_hit,
+        }
+        (run_dir / "stop").touch(mode=0o600)
+        exits = [worker.wait(timeout=10) for worker in workers]
+        checks["workers_exit_cleanly"] = all(code == 0 for code in exits)
+        final_rows = rows(args.dsn)
+        calls = read_calls(run_dir)
+        with psycopg.connect(args.dsn, row_factory=dict_row) as connection:
+            audit_rows = list(
+                connection.execute(
+                    "SELECT task_id::text, state FROM evaluation.terminal_events"
+                ).fetchall()
+            )
+            duplicates = connection.execute(
+                "SELECT count(*) AS n FROM (SELECT idempotency_key FROM resume_cloud_tasks "
+                "GROUP BY idempotency_key HAVING count(*)<>1) s"
+            ).fetchone()
+        audit_counts = Counter(row["task_id"] for row in audit_rows)
+        audit_states = {row["task_id"]: row["state"] for row in audit_rows}
+        checks["each_key_one_task"] = duplicates is not None and duplicates["n"] == 0
+        checks["rate_denials_not_persisted"] = len(final_rows) == len(ids) + 2
+        checks["terminal_transition_exactly_once"] = len(audit_rows) == len(final_rows) and all(
+            audit_counts[row["id"]] == 1 and audit_states[row["id"]] == row["state"]
+            for row in final_rows
+        )
+        checks["one_attempt_per_task"] = all(row["attempt_count"] == 1 for row in final_rows)
+        checks["actual_model_calls_positive"] = len(calls) > 0
+        checks["actual_calls_match_attempt_flags"] = sum(
+            row["model_call_attempted"] for row in final_rows
+        ) == len(calls)
+        checks["batch_errors_no_retry"] = sum(
+            row["state"] == "FAILED" for row in batch_rows
+        ) == sum(call["error_category"] is not None for call in batch_calls)
+        checks["no_fake_contract_errors"] = all(
+            call["error_category"] in {None, GatewayErrorCategory.TIMEOUT.value} for call in calls
+        )
+        checks["requested_failure_scenario_observed"] = args.error_rate == 0 or any(
+            call["error_category"] is not None for call in batch_calls
+        )
+        by_pid = {
+            str(pid): peak([call for call in calls if call["pid"] == pid])
+            for pid in {call["pid"] for call in calls}
+        }
+        checks["all_workers_called_model"] = len(by_pid) == args.workers
+        checks["per_worker_model_peak_bounded"] = all(
+            value <= args.threads for value in by_pid.values()
+        )
+        checks["aggregate_model_peak_bounded"] = peak(calls) <= args.threads * args.workers
+        checks["both_apis_still_ready"] = ready()
         report.update(
             {
-                "worker_exit_codes": exits,
-                "tasks": {
-                    "states": {
-                        s: sum(r["state"] == s for r in rows) for s in {r["state"] for r in rows}
-                    },
-                    "latency_seconds": {
-                        "p50": percentile(
-                            [float(r["latency"]) for r in rows if r["latency"] is not None], 50
-                        ),
-                        "p95": percentile(
-                            [float(r["latency"]) for r in rows if r["latency"] is not None], 95
-                        ),
-                        "max": max(
-                            [float(r["latency"]) for r in rows if r["latency"] is not None],
-                            default=None,
-                        ),
-                    },
+                "requests": {
+                    "create_requests": len(responses),
+                    "statuses": dict(Counter(reply.status for reply in responses)),
+                    "replays": observed_replays,
+                    "burst_duration_seconds": burst_seconds,
+                    "create_latency_seconds": distribution([reply.elapsed for reply in responses]),
                 },
-                "calls": {
-                    "total": len(calls),
-                    "errors": sum(x["errorcategory"] is not None for x in calls),
-                    "per_worker_peak": peaks,
+                "tasks": {
+                    "total": len(final_rows),
+                    "states": dict(Counter(row["state"] for row in final_rows)),
+                    "terminal_audit_events": len(audit_rows),
+                    "duplicate_terminal_events": sum(
+                        max(0, count - 1) for count in audit_counts.values()
+                    ),
+                    "end_to_end_seconds": distribution(
+                        [row["latency"] for row in final_rows if row["latency"] is not None]
+                    ),
+                    "queue_wait_seconds": distribution(
+                        [row["queue_wait"] for row in final_rows if row["queue_wait"] is not None]
+                    ),
+                },
+                "model": {
+                    "calls": len(calls),
+                    "batch_calls": len(batch_calls),
+                    "batch_errors": sum(call["error_category"] is not None for call in batch_calls),
+                    "duration_seconds": distribution([call["duration_seconds"] for call in calls]),
+                    "per_worker_peak": by_pid,
+                    "aggregate_peak": peak(calls),
                     "aggregate_limit": args.workers * args.threads,
                 },
-                "assertions": {
-                    "canonical_calls": len(calls) > 0,
-                    "per_process_peak_bounded": all(x <= args.threads for x in peaks.values()),
-                    "terminal_single_attempt": all_ok,
-                    "idempotent_replay": a[0] == b[0] == 201 and a[2].get("id") == b[2].get("id"),
-                    "replay_conflict": conflict[0] == 409,
-                    "rate_limited": 429 in burst,
-                    "workers_participated": len(peaks) >= min(args.workers, 2),
-                },
+                "worker_snapshots": [
+                    json.loads(path.read_text()) for path in sorted(run_dir.glob("worker-*.json"))
+                ],
             }
         )
-        report["status"] = "PASSED" if all(report["assertions"].values()) else "FAILED"
-        report["passed"] = report["status"] == "PASSED"
-        write_json(out / "report.json", report)
-        (out / "report.md").write_text(
-            "# Resume Cloud concurrency evaluation\n\n" + json.dumps(report, indent=2) + "\n"
-        )
-        (out / "report.md").chmod(0o600)
-        return report
+        write_json(run_dir / "terminal-audit.json", audit_rows)
+        write_json(run_dir / "task-metadata.json", final_rows)
+        report["status"] = "PASSED" if all(checks.values()) else "FAILED"
+    except Exception as error:
+        report["status"] = "FAILED"
+        report["error_category"] = type(error).__name__
+        if isinstance(error, EvaluationError):
+            report["error_code"] = str(error)
     finally:
-        for p in apis:
-            if p.poll() is None:
-                p.terminate()
-                p.wait(timeout=5)
+        (run_dir / "stop").touch(mode=0o600)
+        for process in reversed(processes):
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        report["elapsed_seconds"] = time.monotonic() - started
+        report["finished_at"] = datetime.now(UTC).isoformat()
+        write_json(run_dir / "report.json", report)
+        (run_dir / "report.md").write_text(render_report(report), encoding="utf-8")
+        (run_dir / "report.md").chmod(0o600)
+        report["assertions"]["evidence_contains_no_private_content"] = evidence_is_private(
+            run_dir, token
+        )
+        if not report["assertions"]["evidence_contains_no_private_content"]:
+            report["status"] = "FAILED"
+        write_json(run_dir / "report.json", report)
+        (run_dir / "report.md").write_text(render_report(report), encoding="utf-8")
+    return run_dir / "report.md", report["status"] == "PASSED"
 
 
-def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--dsn")
-    p.add_argument("--tasks", type=int, default=8)
-    p.add_argument("--workers", type=int, default=2)
-    p.add_argument("--threads", type=int, default=2)
-    p.add_argument("--delay", type=float, default=0.05)
-    p.add_argument("--error-rate", type=float, default=0)
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--capacity", type=int, default=20)
-    p.add_argument("--refill", type=float, default=1)
-    p.add_argument("--timeout", type=int, default=60)
-    p.add_argument("--api-child", action="store_true")
-    p.add_argument("--worker-child", action="store_true")
-    p.add_argument("--token")
-    p.add_argument("--port", type=int)
-    p.add_argument("--audit")
-    a = p.parse_args()
-    if a.api_child:
-        api_child(a)
-    elif a.worker_child:
-        worker_child(a)
-    else:
-        try:
-            print(json.dumps(run(a), sort_keys=True))
-        except EvaluationError as e:
-            print("evaluation refused: " + str(e), file=sys.stderr)
-            raise SystemExit(2) from None
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dsn", default=os.environ.get("RESUME_CLOUD_DATABASE_URL", ""))
+    parser.add_argument("--tasks", type=int, default=24)
+    parser.add_argument("--clients", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--threads", type=int, default=2)
+    parser.add_argument("--delay", type=float, default=0.15)
+    parser.add_argument("--error-rate", type=float, default=0)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--capacity", type=int, default=8)
+    parser.add_argument("--refill", type=float, default=0.1)
+    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--child", choices=("api", "worker"), help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-index", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--run-dir", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if not (
+        1 <= args.tasks <= 2000
+        and 1 <= args.clients <= 100
+        and 2 <= args.workers <= 8
+        and 1 <= args.threads <= 16
+        and 0 <= args.error_rate < 1
+        and math.isfinite(args.delay)
+        and 0 <= args.delay <= 10
+        and math.isfinite(args.refill)
+        and args.refill > 0
+        and args.capacity >= 1
+        and 0 < args.timeout <= 3600
+    ):
+        parser.error("invalid bounded evaluation settings")
+    try:
+        if args.child == "api":
+            api_child(args)
+        elif args.child == "worker":
+            worker_child(args)
+        else:
+            path, passed = run(args)
+            print(path)
+            return 0 if passed else 1
+    except Exception as error:
+        print(f"evaluation failed category={type(error).__name__}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
