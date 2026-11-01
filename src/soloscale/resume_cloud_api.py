@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from soloscale.resume_api import BodyLimitMiddleware
 from soloscale.resume_cloud_models import MAX_IDEMPOTENCY_KEY_CHARS, CreateTaskRequest, TaskView
-from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
+from soloscale.resume_cloud_repository import CloudTask, RateLimitExceeded, ResumeCloudRepository
 from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
@@ -84,15 +84,14 @@ def create_app(settings: CloudSettings | None = None) -> FastAPI:
         partition = _DEFAULT_CLIENT_ID if client_id is None else client_id.strip()
         if not _CLIENT_ID.fullmatch(partition):
             raise _error(400, "INVALID_CLIENT_ID")
-        allowed, retry_after = service.consume_client_rate_limit(partition)
-        if not allowed:
+        try:
+            task, _ = service.create(payload, idempotency_key.strip(), partition)
+        except RateLimitExceeded as exc:
             raise HTTPException(
                 status_code=429,
                 detail={"code": "RATE_LIMITED"},
-                headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
-            )
-        try:
-            task, _ = service.create(payload, idempotency_key.strip())
+                headers={"Retry-After": str(max(1, int(exc.retry_after + 0.999)))},
+            ) from exc
         except ValueError as exc:
             if str(exc) == "IDEMPOTENCY_CONFLICT":
                 raise _error(409, "IDEMPOTENCY_CONFLICT") from exc

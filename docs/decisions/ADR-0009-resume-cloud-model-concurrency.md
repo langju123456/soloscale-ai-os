@@ -10,8 +10,8 @@ of upstream model calls can exhaust provider capacity.
 
 ## Decision
 
-Each worker process has `RESUME_CLOUD_MODEL_CONCURRENCY` process-local slots. Worker
-threads share the service semaphore. This deliberately does not claim a global limit:
+Each worker process has `RESUME_CLOUD_MODEL_CONCURRENCY` process-local slots. The worker
+thread-pool and service semaphore both use that one setting. This deliberately does not claim a global limit:
 the aggregate maximum is worker-process count times this setting. A global limit would
 need another shared coordinator and is deferred; PostgreSQL is retained only for durable
 task ownership.

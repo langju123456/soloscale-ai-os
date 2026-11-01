@@ -15,9 +15,24 @@ from psycopg.rows import dict_row
 
 from soloscale.resume_cloud_models import TaskMode, TaskState
 
+LATEST_SCHEMA_VERSION = 2
+BASE_SCHEMA_RELATIONS = {
+    ("public", "resume_cloud_schema_version"),
+    ("public", "resume_cloud_tasks"),
+}
+LATEST_SCHEMA_RELATIONS = BASE_SCHEMA_RELATIONS | {
+    ("public", "resume_cloud_rate_limits"),
+}
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+class RateLimitExceeded(Exception):
+    def __init__(self, retry_after: float) -> None:
+        self.retry_after = retry_after
+        super().__init__("client rate limit exceeded")
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,10 @@ class ResumeCloudRepository:
         mode: TaskMode,
         approved: bool,
         input_ttl_hours: int,
+        client_id: str,
+        rate_limit_capacity: int,
+        rate_limit_refill_per_second: float,
+        rate_limit_now: datetime,
     ) -> tuple[CloudTask, bool]:
         task_id = uuid.uuid4()
         with self._connect() as conn, conn.cursor() as cur:
@@ -91,6 +110,15 @@ class ResumeCloudRepository:
             )
             created = cur.fetchone()
             if created is not None:
+                allowed, retry_after = self._consume_rate_limit(
+                    cur,
+                    client_id,
+                    capacity=rate_limit_capacity,
+                    refill_per_second=rate_limit_refill_per_second,
+                    now=rate_limit_now,
+                )
+                if not allowed:
+                    raise RateLimitExceeded(retry_after)
                 return self._task(created), False
             cur.execute(
                 "SELECT * FROM resume_cloud_tasks WHERE idempotency_key=%s FOR UPDATE",
@@ -113,12 +141,29 @@ class ResumeCloudRepository:
     ) -> tuple[bool, float]:
         """Atomically spend one client token; API instances share this PostgreSQL row."""
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO resume_cloud_rate_limits (client_id, tokens, updated_at, last_allowed)
-                VALUES (%s, %s, %s, FALSE) ON CONFLICT (client_id) DO NOTHING""",
-                (client_id, capacity, now),
+            return self._consume_rate_limit(
+                cur,
+                client_id,
+                capacity=capacity,
+                refill_per_second=refill_per_second,
+                now=now,
             )
-            cur.execute(
+
+    @staticmethod
+    def _consume_rate_limit(
+        cur: psycopg.Cursor[dict[str, Any]],
+        client_id: str,
+        *,
+        capacity: int,
+        refill_per_second: float,
+        now: datetime,
+    ) -> tuple[bool, float]:
+        cur.execute(
+            """INSERT INTO resume_cloud_rate_limits (client_id, tokens, updated_at, last_allowed)
+            VALUES (%s, %s, %s, FALSE) ON CONFLICT (client_id) DO NOTHING""",
+            (client_id, capacity, now),
+        )
+        cur.execute(
                 """WITH available AS (
                     SELECT LEAST(%s::double precision, tokens + GREATEST(0, EXTRACT(EPOCH FROM
                     (%s::timestamptz - updated_at))) * %s) AS tokens FROM resume_cloud_rate_limits
@@ -130,10 +175,10 @@ class ResumeCloudRepository:
                 FROM available WHERE limits.client_id=%s
                 RETURNING limits.last_allowed, limits.tokens""",
                 (capacity, now, refill_per_second, client_id, now, client_id),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            return bool(row["last_allowed"]), max(0.0, (1.0 - float(row["tokens"])) / refill_per_second)
+        )
+        row = cur.fetchone()
+        assert row is not None
+        return bool(row["last_allowed"]), max(0.0, (1.0 - float(row["tokens"])) / refill_per_second)
 
     def get(self, task_id: str) -> CloudTask | None:
         with self._connect() as conn, conn.cursor() as cur:
@@ -221,16 +266,18 @@ class ResumeCloudRepository:
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks
                 WHERE state='RUNNING' AND lease_expires_at < now() ORDER BY lease_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET state='NEEDS_REVIEW', failure_code='LEASE_EXPIRED',
-                resume_docx=NULL, job_description=NULL, updated_at=now() FROM selected WHERE t.id=selected.id""")
+                resume_docx=NULL, job_description=NULL, updated_at=now() FROM selected
+                WHERE t.id=selected.id AND t.state='RUNNING' AND t.lease_expires_at < now()""")
             recovered = cur.rowcount
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks WHERE state IN ('PREPARED','QUEUED')
                 AND input_expires_at < now() ORDER BY input_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET state='FAILED', failure_code='INPUT_EXPIRED', resume_docx=NULL,
-                job_description=NULL, completed_at=now(), updated_at=now() FROM selected WHERE t.id=selected.id""")
+                job_description=NULL, completed_at=now(), updated_at=now() FROM selected
+                WHERE t.id=selected.id AND t.state IN ('PREPARED','QUEUED') AND t.input_expires_at < now()""")
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks WHERE state='SUCCEEDED'
                 AND output_expires_at < now() ORDER BY output_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET output_docx=NULL, output_sha256=NULL, updated_at=now()
-                FROM selected WHERE t.id=selected.id""")
+                FROM selected WHERE t.id=selected.id AND t.state='SUCCEEDED' AND t.output_expires_at < now()""")
             return recovered
 
     @staticmethod
@@ -249,5 +296,13 @@ class ResumeCloudRepository:
 
     def ready(self) -> bool:
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT version FROM resume_cloud_schema_version")
-            return cur.fetchone() == {"version": 1}
+            cur.execute(
+                """SELECT n.nspname, c.relname FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid=c.relnamespace
+                WHERE n.nspname='public' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')"""
+            )
+            relations = {(row["nspname"], row["relname"]) for row in cur.fetchall()}
+            if relations != LATEST_SCHEMA_RELATIONS:
+                return False
+            cur.execute("SELECT version FROM resume_cloud_schema_version ORDER BY version")
+            return cur.fetchall() == [{"version": LATEST_SCHEMA_VERSION}]

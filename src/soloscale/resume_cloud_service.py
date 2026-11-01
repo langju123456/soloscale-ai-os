@@ -131,7 +131,9 @@ class ResumeCloudService:
         self.settings = settings
         self._model_slots = threading.BoundedSemaphore(settings.max_model_concurrency)
 
-    def create(self, payload: CreateTaskRequest, idempotency_key: str) -> tuple[CloudTask, bool]:
+    def create(
+        self, payload: CreateTaskRequest, idempotency_key: str, client_id: str
+    ) -> tuple[CloudTask, bool]:
         template, jd, payload_hash = prepare_cloud_input(payload)
         return self.repository.create_or_replay(
             idempotency_key=idempotency_key,
@@ -141,6 +143,10 @@ class ResumeCloudService:
             mode=payload.mode,
             approved=payload.approve_external_model_call,
             input_ttl_hours=self.settings.input_ttl_hours,
+            client_id=client_id,
+            rate_limit_capacity=self.settings.rate_limit_capacity,
+            rate_limit_refill_per_second=self.settings.rate_limit_refill_per_second,
+            rate_limit_now=self.settings.clock(),
         )
 
     def consume_client_rate_limit(self, client_id: str) -> tuple[bool, float]:
@@ -179,8 +185,9 @@ class ResumeCloudService:
         # slots are occupied: it remains QUEUED for a later worker loop.
         if not self._model_slots.acquire(blocking=False):
             return None
-        task = self.repository.claim(self.settings.lease_seconds)
+        task: CloudTask | None = None
         try:
+            task = self.repository.claim(self.settings.lease_seconds)
             if task is None:
                 return None
             assert (
@@ -198,7 +205,9 @@ class ResumeCloudService:
                     raise RuntimeError("MODEL_NOT_CONFIGURED")
                 if not self.repository.mark_model_call(task.id, task.worker_token):
                     raise RuntimeError("TASK_LEASE_LOST")
-                with _LeaseHeartbeat(self.repository, task, self.settings.lease_seconds) as heartbeat:
+                with _LeaseHeartbeat(
+                    self.repository, task, self.settings.lease_seconds
+                ) as heartbeat:
                     output = tailor_resume_docx_with_gateway(
                         task.resume_docx, task.job_description, gateway=selected_gateway
                     ).content
@@ -208,7 +217,7 @@ class ResumeCloudService:
                 task.id, task.worker_token, output, self.settings.output_ttl_hours
             )
         except (ResumeTemplateError, RuntimeError):
-            if task is not None:
+            if task is not None and task.worker_token is not None:
                 self.repository.fail(task.id, task.worker_token, "PROCESSING_REJECTED")
         finally:
             self._model_slots.release()

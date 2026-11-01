@@ -7,11 +7,11 @@ from pathlib import Path
 
 import psycopg
 
-EXPECTED = {
-    ("public", "resume_cloud_schema_version"),
-    ("public", "resume_cloud_tasks"),
-    ("public", "resume_cloud_rate_limits"),
-}
+from soloscale.resume_cloud_repository import (
+    BASE_SCHEMA_RELATIONS,
+    LATEST_SCHEMA_RELATIONS,
+    LATEST_SCHEMA_VERSION,
+)
 
 
 def main() -> None:
@@ -26,21 +26,24 @@ def main() -> None:
             WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
               AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')""")
         existing = set(cur.fetchall())
-        if existing - EXPECTED:
+        if existing - LATEST_SCHEMA_RELATIONS:
             raise SystemExit("refusing database with unrelated user relations")
-        initial = {("public", "resume_cloud_schema_version"), ("public", "resume_cloud_tasks")}
-        if existing and existing not in (initial, EXPECTED):
+        if existing and existing not in (BASE_SCHEMA_RELATIONS, LATEST_SCHEMA_RELATIONS):
             raise SystemExit("refusing incomplete Resume cloud schema")
         if not existing:
             cur.execute((migration_dir / "0001_init.sql").read_text())
-            existing = initial
-        cur.execute("SELECT version FROM resume_cloud_schema_version")
-        row = cur.fetchone()
-        if row is None or row[0] not in {1, 2}:
-            raise SystemExit("refusing unexpected Resume cloud schema version")
-        if row[0] == 1:
+            existing = BASE_SCHEMA_RELATIONS
+        cur.execute("SELECT version FROM resume_cloud_schema_version ORDER BY version")
+        versions = [row[0] for row in cur.fetchall()]
+        if existing == BASE_SCHEMA_RELATIONS:
+            if versions != [1]:
+                raise SystemExit("refusing Resume cloud v1 relation/version mismatch")
             cur.execute((migration_dir / "0002_rate_limits.sql").read_text())
             cur.execute("UPDATE resume_cloud_schema_version SET version=2 WHERE version=1")
+            existing = LATEST_SCHEMA_RELATIONS
+            versions = [LATEST_SCHEMA_VERSION]
+        if existing != LATEST_SCHEMA_RELATIONS or versions != [LATEST_SCHEMA_VERSION]:
+            raise SystemExit("refusing Resume cloud v2 relation/version mismatch")
 
 
 if __name__ == "__main__":
