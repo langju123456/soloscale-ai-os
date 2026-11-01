@@ -88,9 +88,7 @@ def test_in_memory_otel_reader_receives_fixed_metric_names() -> None:
     data = reader.get_metrics_data()
     assert data is not None
     names = {
-        metric.name
-        for scope in data.resource_metrics[0].scope_metrics
-        for metric in scope.metrics
+        metric.name for scope in data.resource_metrics[0].scope_metrics for metric in scope.metrics
     }
     assert names == {
         "resume_cloud.tasks_created",
@@ -98,3 +96,27 @@ def test_in_memory_otel_reader_receives_fixed_metric_names() -> None:
         "resume_cloud.model_active",
         "resume_cloud.model_peak",
     }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:4318",
+        "http://localhost:4318/",
+        "http://localhost:4318/v1/traces",
+        "http://localhost:4318/v1/traces/",
+        "http://localhost:4318/v1/metrics",
+        "http://localhost:4318/v1/metrics/",
+    ],
+)
+def test_metrics_endpoint_normalization(endpoint: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def create(exporter: str, endpoint: str = "") -> ResumeCloudMetrics:
+        captured.append(endpoint)
+        return ResumeCloudMetrics()
+
+    monkeypatch.delenv("RESUME_CLOUD_METRICS_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setattr(ResumeCloudMetrics, "from_environment", staticmethod(create))
+    Telemetry(endpoint=endpoint).shutdown()
+    assert captured == ["http://localhost:4318/v1/metrics"]

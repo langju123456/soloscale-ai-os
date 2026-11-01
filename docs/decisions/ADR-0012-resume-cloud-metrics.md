@@ -3,6 +3,11 @@
 **Status:** Accepted
 **Date:** 2026-11-01
 
+## Problem
+
+Task logs cannot quantify queue pressure, upstream saturation, cache reuse or failures across
+a burst. Measurements need bounded memory and must never carry request or output content.
+
 ## Decision
 
 Resume cloud processes retain a fixed-size, thread-safe metadata-only metrics collector.
@@ -22,3 +27,15 @@ gets that suffix), so metrics are never sent to a trace endpoint.
 The Compose default builds `cloud,observability` because tracing or OTLP metrics are optional
 at runtime but require those installed extras when enabled. The package and Dockerfile defaults
 remain usable without observability, and tracing remains disabled by default.
+
+## Alternatives
+
+- Per-task/client labels were rejected to avoid unbounded cardinality and identity leakage.
+- A shared metrics database was rejected because monitoring writes should not add queue contention.
+- A mandatory monitoring server was rejected to keep PostgreSQL as the only required infrastructure.
+- Process snapshots alone are insufficient for fleet history; optional OTLP exports allow an existing
+  collector to aggregate instances. Snapshots and peaks reset on restart and are not global counters.
+
+Queue samples use a nullable migration-added `queued_at`, set only on PREPARED-to-QUEUED.
+Legacy rows with no timestamp are excluded instead of inventing queue durations. Model gauges
+wrap the actual gateway call; durations include errors. Recovery counts are emitted after commit.

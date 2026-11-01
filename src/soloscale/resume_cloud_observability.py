@@ -35,6 +35,7 @@ class Telemetry:
         self._closed = False
         metrics_endpoint = os.environ.get("RESUME_CLOUD_METRICS_OTLP_ENDPOINT", "") or endpoint
         if metrics_endpoint:
+            metrics_endpoint = metrics_endpoint.rstrip("/")
             metrics_endpoint = (
                 metrics_endpoint[: -len("/v1/traces")] + "/v1/metrics"
                 if metrics_endpoint.rstrip("/").endswith("/v1/traces")
@@ -48,6 +49,7 @@ class Telemetry:
         if not enabled:
             return
         from opentelemetry import propagate, trace
+
         if provider is None:
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter

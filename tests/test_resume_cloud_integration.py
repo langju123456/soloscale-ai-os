@@ -862,3 +862,49 @@ def test_stale_ai_recovery_never_invokes_gateway(monkeypatch: pytest.MonkeyPatch
     )
     assert service.process_one(gateway=_gateway()) is None
     assert service.repository.get(task_id).state.value == "NEEDS_REVIEW"  # type: ignore[union-attr]
+
+
+def test_cleanup_does_not_delete_concurrently_refreshed_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service = _client()
+    monkeypatch.setattr(
+        "soloscale.resume_cloud_service.tailor_resume_docx",
+        lambda *_: SimpleNamespace(content=b"synthetic-cache"),
+    )
+    headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
+    task_id = client.post("/tasks", json=_payload(), headers=headers).json()["id"]
+    client.post(f"/tasks/{task_id}/process", headers=headers)
+    assert service.process_one() is not None
+    repository = service.repository
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE resume_cloud_result_cache SET output_expires_at=now()-interval '1 second'"
+        )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with repository._connect() as refresher:
+            refresher.execute(
+                "UPDATE resume_cloud_result_cache SET output_expires_at=now()+interval '1 hour'"
+            )
+            cleanup = pool.submit(repository.recover_and_cleanup)
+            blocked = False
+            deadline = time.monotonic() + 5
+            with repository._connect() as observer:
+                observer.autocommit = True
+                while time.monotonic() < deadline:
+                    row = observer.execute(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE "
+                        "wait_event_type='Lock' AND query LIKE "
+                        "'%DELETE FROM resume_cloud_result_cache%') AS blocked"
+                    ).fetchone()
+                    if row is not None and row["blocked"]:
+                        blocked = True
+                        break
+                    time.sleep(0.01)
+            # Release the row lock before waiting for the cleaner, even on failure.
+            refresher.commit()
+        assert cleanup.result(timeout=5) == 0
+        assert blocked, "cleaner must have selected the old expired row and waited for refresh"
+    with repository._connect() as connection:
+        row = connection.execute("SELECT count(*) AS n FROM resume_cloud_result_cache").fetchone()
+        assert row is not None and row["n"] == 1
