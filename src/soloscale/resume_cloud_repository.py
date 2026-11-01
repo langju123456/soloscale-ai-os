@@ -16,7 +16,7 @@ from psycopg.rows import dict_row
 from soloscale.resume_cloud_cache import ResultCacheKey, sha256_text
 from soloscale.resume_cloud_models import TaskMode, TaskState
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 BASE_SCHEMA_RELATIONS = {
     ("public", "resume_cloud_schema_version"),
     ("public", "resume_cloud_tasks"),
@@ -56,6 +56,7 @@ class CloudTask:
     model_call_attempted: bool
     worker_token: str | None
     failure_code: str | None
+    traceparent: str | None
 
 
 class ResumeCloudRepository:
@@ -83,6 +84,7 @@ class ResumeCloudRepository:
             model_call_attempted=row["model_call_attempted"],
             worker_token=(str(row["worker_token"]) if row.get("worker_token") else None),
             failure_code=row.get("failure_code"),
+            traceparent=row.get("traceparent"),
         )
 
     def create_or_replay(
@@ -101,13 +103,14 @@ class ResumeCloudRepository:
         rate_limit_capacity: int,
         rate_limit_refill_per_second: float,
         rate_limit_now: datetime,
+        traceparent: str | None = None,
     ) -> tuple[CloudTask, bool]:
         task_id = uuid.uuid4()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO resume_cloud_tasks
-                (id,idempotency_key,payload_sha256,state,mode,approve_external_model_call,resume_docx,job_description,input_expires_at,client_key,raw_resume_sha256,job_description_sha256)
-                VALUES (%s,%s,%s,'PREPARED',%s,%s,%s,%s,%s,%s,%s,%s)
+                (id,idempotency_key,payload_sha256,state,mode,approve_external_model_call,resume_docx,job_description,input_expires_at,client_key,raw_resume_sha256,job_description_sha256,traceparent)
+                VALUES (%s,%s,%s,'PREPARED',%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (idempotency_key) DO NOTHING RETURNING *""",
                 (
                     task_id,
@@ -121,6 +124,7 @@ class ResumeCloudRepository:
                     sha256_text(client_id),
                     raw_resume_sha256,
                     job_description_sha256,
+                    traceparent,
                 ),
             )
             created = cur.fetchone()
@@ -142,9 +146,9 @@ class ResumeCloudRepository:
             existing = cur.fetchone()
             if existing is None:
                 raise RuntimeError("idempotency replay was not persisted")
-            if (
-                existing["payload_sha256"] != payload_hash
-                or existing.get("client_key") != sha256_text(client_id)
+            if existing["payload_sha256"] != payload_hash or (
+                existing.get("client_key") is not None
+                and existing["client_key"] != sha256_text(client_id)
             ):
                 raise ValueError("IDEMPOTENCY_CONFLICT")
             return self._task(existing), True
@@ -182,7 +186,7 @@ class ResumeCloudRepository:
             (client_id, capacity, now),
         )
         cur.execute(
-                """WITH available AS (
+            """WITH available AS (
                     SELECT LEAST(%s::double precision, tokens + GREATEST(0, EXTRACT(EPOCH FROM
                     (%s::timestamptz - updated_at))) * %s) AS tokens FROM resume_cloud_rate_limits
                     WHERE client_id=%s FOR UPDATE)
@@ -192,7 +196,7 @@ class ResumeCloudRepository:
                   last_allowed = available.tokens >= 1
                 FROM available WHERE limits.client_id=%s
                 RETURNING limits.last_allowed, limits.tokens""",
-                (capacity, now, refill_per_second, client_id, now, client_id),
+            (capacity, now, refill_per_second, client_id, now, client_id),
         )
         row = cur.fetchone()
         assert row is not None
@@ -265,12 +269,9 @@ class ResumeCloudRepository:
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (client_key,raw_resume_sha256,job_description_sha256,mode,provider,
                     model,base_url_sha256,pipeline_sha256) DO UPDATE SET
-                    output_docx=CASE WHEN EXCLUDED.output_expires_at < resume_cloud_result_cache.output_expires_at
-                        THEN EXCLUDED.output_docx ELSE resume_cloud_result_cache.output_docx END,
-                    output_sha256=CASE WHEN EXCLUDED.output_expires_at < resume_cloud_result_cache.output_expires_at
-                        THEN EXCLUDED.output_sha256 ELSE resume_cloud_result_cache.output_sha256 END,
-                    output_expires_at=LEAST(resume_cloud_result_cache.output_expires_at,
-                        EXCLUDED.output_expires_at)""",
+                    output_docx=EXCLUDED.output_docx, output_sha256=EXCLUDED.output_sha256,
+                    output_expires_at=EXCLUDED.output_expires_at
+                    WHERE resume_cloud_result_cache.output_expires_at <= now()""",
                     (
                         cache_key.client_key,
                         cache_key.raw_resume_sha256,
@@ -326,7 +327,6 @@ class ResumeCloudRepository:
                 (code, task_id, token),
             )
             return cur.rowcount == 1
-
 
     def mark_model_call(self, task_id: str, token: str) -> bool:
         """Persist the possible paid-call boundary before provider invocation."""

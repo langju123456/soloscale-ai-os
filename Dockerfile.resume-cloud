@@ -1,7 +1,8 @@
 FROM python:3.12-slim AS build
+ARG RESUME_CLOUD_EXTRAS=cloud
 WORKDIR /app
 COPY pyproject.toml README.md ./
-RUN python -c "import tomllib; p=tomllib.load(open('pyproject.toml','rb')); open('/tmp/requirements.txt','w').write('\\n'.join(p['project']['dependencies'] + p['project']['optional-dependencies']['cloud']))"
+RUN python -c "import tomllib; p=tomllib.load(open('pyproject.toml','rb')); extras='${RESUME_CLOUD_EXTRAS}'.split(','); open('/tmp/requirements.txt','w').write('\\n'.join(p['project']['dependencies'] + sum((p['project']['optional-dependencies'][item] for item in extras), [])))"
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY src ./src
 COPY .agents ./.agents

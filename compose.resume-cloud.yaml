@@ -33,6 +33,9 @@ services:
     environment:
       RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
       RESUME_CLOUD_BEARER_TOKEN_FILE: /run/secrets/api_bearer_token
+      RESUME_CLOUD_TRACING: ${RESUME_CLOUD_TRACING:-false}
+      RESUME_CLOUD_TRACE_EXPORTER: ${RESUME_CLOUD_TRACE_EXPORTER:-console}
+      RESUME_CLOUD_OTLP_ENDPOINT: ${RESUME_CLOUD_OTLP_ENDPOINT:-}
     secrets: [postgres_password, api_bearer_token]
     user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
     entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_api"]
@@ -48,6 +51,9 @@ services:
       dockerfile: Dockerfile.resume-cloud
     environment:
       RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
+      RESUME_CLOUD_TRACING: ${RESUME_CLOUD_TRACING:-false}
+      RESUME_CLOUD_TRACE_EXPORTER: ${RESUME_CLOUD_TRACE_EXPORTER:-console}
+      RESUME_CLOUD_OTLP_ENDPOINT: ${RESUME_CLOUD_OTLP_ENDPOINT:-}
     secrets: [postgres_password]
     user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
     entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_worker"]

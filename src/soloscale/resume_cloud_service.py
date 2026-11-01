@@ -25,6 +25,7 @@ from soloscale.resume_cloud_cache import (
     generation_pipeline_fingerprint,
 )
 from soloscale.resume_cloud_models import CreateTaskRequest, TaskMode
+from soloscale.resume_cloud_observability import Telemetry
 from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
 from soloscale.resume_docx import (
     ResumeTemplateError,
@@ -142,14 +143,20 @@ class ResumeCloudService:
         repository: ResumeCloudRepository,
         settings: CloudSettings,
         pipeline_fingerprint: Callable[[], str] = generation_pipeline_fingerprint,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self.repository = repository
         self.settings = settings
         self.pipeline_fingerprint = pipeline_fingerprint
+        self.telemetry = telemetry or Telemetry()
         self._model_slots = threading.BoundedSemaphore(settings.max_model_concurrency)
 
     def create(
-        self, payload: CreateTaskRequest, idempotency_key: str, client_id: str = "default"
+        self,
+        payload: CreateTaskRequest,
+        idempotency_key: str,
+        client_id: str = "default",
+        traceparent: str | None = None,
     ) -> tuple[CloudTask, bool]:
         template, jd, payload_hash, raw_resume_sha256, job_description_sha256 = prepare_cloud_input(
             payload
@@ -168,6 +175,7 @@ class ResumeCloudService:
             rate_limit_capacity=self.settings.rate_limit_capacity,
             rate_limit_refill_per_second=self.settings.rate_limit_refill_per_second,
             rate_limit_now=self.settings.clock(),
+            traceparent=traceparent,
         )
 
     def consume_client_rate_limit(self, client_id: str) -> tuple[bool, float]:
@@ -227,7 +235,8 @@ class ResumeCloudService:
             return None
         task: CloudTask | None = None
         try:
-            task = self.repository.claim(self.settings.lease_seconds)
+            with self.telemetry.span("worker.claim"):
+                task = self.repository.claim(self.settings.lease_seconds)
             if task is None:
                 return None
             assert (
@@ -235,41 +244,39 @@ class ResumeCloudService:
                 and task.job_description is not None
                 and task.worker_token is not None
             )
-            if task.mode is TaskMode.TEMPLATE:
-                cache_key = self._cache_key(task, None)
-                if cache_key is not None and self.repository.complete_from_cache(
-                    task.id, task.worker_token, cache_key
-                ):
-                    return self.repository.get(task.id)
-                output = tailor_resume_docx(task.resume_docx, task.job_description).content
-            else:
-                if not task.approve_external_model_call:
-                    raise RuntimeError("MODEL_APPROVAL_REQUIRED")
-                selected_gateway = gateway or self.configured_gateway()
-                if selected_gateway is None:
-                    raise RuntimeError("MODEL_NOT_CONFIGURED")
-                cache_key = self._cache_key(task, selected_gateway)
-                if cache_key is not None and self.repository.complete_from_cache(
-                    task.id, task.worker_token, cache_key
-                ):
-                    return self.repository.get(task.id)
-                if not self.repository.mark_model_call(task.id, task.worker_token):
-                    raise RuntimeError("TASK_LEASE_LOST")
-                with _LeaseHeartbeat(
-                    self.repository, task, self.settings.lease_seconds
-                ) as heartbeat:
-                    output = tailor_resume_docx_with_gateway(
-                        task.resume_docx, task.job_description, gateway=selected_gateway
-                    ).content
-                    if heartbeat.lost.is_set():
+            with self.telemetry.span("worker.execute", {"task.id": task.id}, task.traceparent):
+                if task.mode is TaskMode.TEMPLATE:
+                    cache_key = self._cache_key(task, None)
+                    if cache_key is not None and self.repository.complete_from_cache(
+                        task.id, task.worker_token, cache_key
+                    ):
+                        return self.repository.get(task.id)
+                    output = tailor_resume_docx(task.resume_docx, task.job_description).content
+                else:
+                    if not task.approve_external_model_call:
+                        raise RuntimeError("MODEL_APPROVAL_REQUIRED")
+                    selected_gateway = gateway or self.configured_gateway()
+                    if selected_gateway is None:
+                        raise RuntimeError("MODEL_NOT_CONFIGURED")
+                    selected_gateway = self.telemetry.wrap_gateway(selected_gateway)
+                    cache_key = self._cache_key(task, selected_gateway)
+                    if cache_key is not None and self.repository.complete_from_cache(
+                        task.id, task.worker_token, cache_key
+                    ):
+                        return self.repository.get(task.id)
+                    if not self.repository.mark_model_call(task.id, task.worker_token):
                         raise RuntimeError("TASK_LEASE_LOST")
-            self.repository.complete(
-                task.id,
-                task.worker_token,
-                output,
-                self.settings.output_ttl_hours,
-                cache_key,
-            )
+                    with _LeaseHeartbeat(
+                        self.repository, task, self.settings.lease_seconds
+                    ) as heartbeat:
+                        output = tailor_resume_docx_with_gateway(
+                            task.resume_docx, task.job_description, gateway=selected_gateway
+                        ).content
+                        if heartbeat.lost.is_set():
+                            raise RuntimeError("TASK_LEASE_LOST")
+                self.repository.complete(
+                    task.id, task.worker_token, output, self.settings.output_ttl_hours, cache_key
+                )
         except (ResumeTemplateError, RuntimeError):
             if task is not None and task.worker_token is not None:
                 self.repository.fail(task.id, task.worker_token, "PROCESSING_REJECTED")

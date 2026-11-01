@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from soloscale.resume_api import BodyLimitMiddleware
 from soloscale.resume_cloud_models import MAX_IDEMPOTENCY_KEY_CHARS, CreateTaskRequest, TaskView
+from soloscale.resume_cloud_observability import Telemetry
 from soloscale.resume_cloud_repository import CloudTask, RateLimitExceeded, ResumeCloudRepository
 from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService
 
@@ -36,10 +37,13 @@ def _error(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code})
 
 
-def create_app(settings: CloudSettings | None = None) -> FastAPI:
+def create_app(
+    settings: CloudSettings | None = None, telemetry: Telemetry | None = None
+) -> FastAPI:
     selected = settings or CloudSettings.from_environment()
     repository = ResumeCloudRepository(selected.database_url)
-    service = ResumeCloudService(repository, selected)
+    selected_telemetry = telemetry or Telemetry.from_environment()
+    service = ResumeCloudService(repository, selected, telemetry=selected_telemetry)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(BodyLimitMiddleware)
 
@@ -74,6 +78,7 @@ def create_app(settings: CloudSettings | None = None) -> FastAPI:
         payload: CreateTaskRequest,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
         client_id: Annotated[str | None, Header(alias="X-Client-ID")] = None,
+        incoming_traceparent: Annotated[str | None, Header(alias="traceparent")] = None,
     ) -> TaskView:
         if (
             idempotency_key is None
@@ -85,7 +90,10 @@ def create_app(settings: CloudSettings | None = None) -> FastAPI:
         if not _CLIENT_ID.fullmatch(partition):
             raise _error(400, "INVALID_CLIENT_ID")
         try:
-            task, _ = service.create(payload, idempotency_key.strip(), partition)
+            with selected_telemetry.span("api.tasks.create", parent=incoming_traceparent):
+                task, _ = service.create(
+                    payload, idempotency_key.strip(), partition, selected_telemetry.traceparent()
+                )
         except RateLimitExceeded as exc:
             raise HTTPException(
                 status_code=429,

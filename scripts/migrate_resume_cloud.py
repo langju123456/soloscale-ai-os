@@ -53,9 +53,13 @@ def main() -> None:
             cur.execute((migration_dir / "0003_result_cache.sql").read_text())
             cur.execute("UPDATE resume_cloud_schema_version SET version=3 WHERE version=2")
             existing = LATEST_SCHEMA_RELATIONS
+            versions = [3]
+        if existing == LATEST_SCHEMA_RELATIONS and versions == [3]:
+            cur.execute((migration_dir / "0004_traceparent.sql").read_text())
+            cur.execute("UPDATE resume_cloud_schema_version SET version=4 WHERE version=3")
             versions = [LATEST_SCHEMA_VERSION]
         if existing != LATEST_SCHEMA_RELATIONS or versions != [LATEST_SCHEMA_VERSION]:
-            raise SystemExit("refusing Resume cloud v3 relation/version mismatch")
+            raise SystemExit("refusing Resume cloud latest relation/version mismatch")
 
 
 if __name__ == "__main__":

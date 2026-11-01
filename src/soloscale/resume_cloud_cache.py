@@ -44,7 +44,7 @@ def generation_pipeline_fingerprint(paths: Iterable[Path] | None = None) -> str:
         paths = (package / name for name in sorted(names))
     digest = hashlib.sha256()
     for path in sorted((Path(path) for path in paths), key=lambda item: str(item)):
-        digest.update(str(path).encode("utf-8"))
+        digest.update(path.name.encode("utf-8"))
         content = path.read_bytes()
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)

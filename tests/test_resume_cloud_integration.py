@@ -496,10 +496,13 @@ def test_stale_or_wrong_worker_tokens_cannot_change_task() -> None:
     assert task is not None and task.state.value == "NEEDS_REVIEW"
 
 
-@pytest.mark.parametrize("relation_sql", [
-    "CREATE TABLE other_schema.audit (id integer)",
-    "CREATE MATERIALIZED VIEW other_schema.audit AS SELECT 1 AS id",
-])
+@pytest.mark.parametrize(
+    "relation_sql",
+    [
+        "CREATE TABLE other_schema.audit (id integer)",
+        "CREATE MATERIALIZED VIEW other_schema.audit AS SELECT 1 AS id",
+    ],
+)
 def test_migrator_refuses_relation_in_other_schema(relation_sql: str) -> None:
     assert DATABASE_URL is not None
     with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
@@ -529,8 +532,8 @@ def test_migrator_rerun_accepts_exact_v3_schema() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_v2_task_migration_replays_as_legacy_default_client() -> None:
-    """v2 did not retain client labels, so all existing rows use the default partition."""
+def test_v2_task_migration_replays_for_any_legacy_client_partition() -> None:
+    """v2 did not retain a label, so idempotency remains global for legacy rows."""
     assert DATABASE_URL is not None
     payload = _payload()
     from soloscale.resume_cloud_models import CreateTaskRequest
@@ -543,7 +546,8 @@ def test_v2_task_migration_replays_as_legacy_default_client() -> None:
         cur.execute("DROP TABLE resume_cloud_result_cache")
         cur.execute(
             "ALTER TABLE resume_cloud_tasks DROP COLUMN client_key, "
-            "DROP COLUMN raw_resume_sha256, DROP COLUMN job_description_sha256"
+            "DROP COLUMN raw_resume_sha256, DROP COLUMN job_description_sha256, "
+            "DROP COLUMN traceparent"
         )
         cur.execute(
             "ALTER TABLE resume_cloud_schema_version DROP CONSTRAINT "
@@ -579,7 +583,17 @@ def test_v2_task_migration_replays_as_legacy_default_client() -> None:
     assert replay.json()["id"] == task_id
     task = ResumeCloudRepository(DATABASE_URL).get(task_id)
     assert task is not None
-    assert task.client_key == "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f"
+    alpha = client.post(
+        "/tasks",
+        json=payload,
+        headers={
+            "Authorization": "Bearer " + "t" * 32,
+            "Idempotency-Key": key,
+            "X-Client-ID": "alpha",
+        },
+    )
+    assert alpha.status_code == 201 and alpha.json()["id"] == task_id
+    assert task.client_key is None
     assert task.raw_resume_sha256 is None and task.job_description_sha256 is None
 
 
@@ -602,10 +616,10 @@ def test_migrator_refuses_v3_relations_with_v1_version() -> None:
         assert result.returncode != 0
     finally:
         with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=3")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=4")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4))"
             )
 
 
@@ -623,10 +637,10 @@ def test_ready_requires_latest_schema_version() -> None:
         assert not repository.ready()
     finally:
         with repository._connect() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE resume_cloud_schema_version SET version=3")
+            cur.execute("UPDATE resume_cloud_schema_version SET version=4")
             cur.execute(
                 "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
-                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3))"
+                "resume_cloud_schema_version_version_check CHECK (version IN (1, 2, 3, 4))"
             )
 
 
