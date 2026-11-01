@@ -2,7 +2,8 @@
 """Real local PostgreSQL/HTTP/process evidence with a synthetic ModelGateway.
 
 Only a fresh loopback resume_service_eval database is accepted. Start PostgreSQL
-with compose.resume-cloud.yaml; this command owns only its API/worker children.
+with compose.resume-cloud.yaml plus compose.resume-cloud-eval.yaml; this command
+owns only its API/worker children.
 """
 
 from __future__ import annotations
@@ -459,7 +460,7 @@ def render_report(report: dict[str, Any]) -> str:
         "| Measurement | Observed value |",
         "|---|---|",
     ]
-    for section in ("config", "requests", "tasks", "model", "cache"):
+    for section in ("config", "requests", "tasks", "model", "cache", "metrics"):
         for name, value in report.get(section, {}).items():
             lines.append(f"| {section}.{name} | `{json.dumps(value, sort_keys=True)}` |")
     lines.extend(["", "| Assertion | Result |", "|---|---|"])
@@ -577,6 +578,10 @@ def run(args: argparse.Namespace) -> tuple[Path, bool]:
                     stderr=subprocess.DEVNULL,
                 )
             )
+
+        report["api_processes"] = [
+            {"pid": process.pid, "url": url} for process, url in zip(processes, urls, strict=True)
+        ]
 
         def ready() -> bool:
             try:
@@ -794,6 +799,48 @@ def run(args: argparse.Namespace) -> tuple[Path, bool]:
         )
         checks["aggregate_model_peak_bounded"] = peak(calls) <= args.threads * args.workers
         checks["both_apis_still_ready"] = ready()
+        snapshots = [json.loads(path.read_text()) for path in sorted(run_dir.glob("worker-*.json"))]
+        metrics = [snapshot["metrics"] for snapshot in snapshots]
+        measured = {
+            "queue_samples": sum(
+                item["histograms"]["queue_wait_seconds"]["count"] for item in metrics
+            ),
+            "model_samples": sum(
+                item["histograms"][f"model_duration_seconds.{outcome}"]["count"]
+                for item in metrics
+                for outcome in ("success", "error")
+            ),
+            "cache_lookups": sum(item["counters"]["cache_lookups"] for item in metrics),
+            "cache_hits": sum(item["counters"]["cache_hits"] for item in metrics),
+        }
+        checks["metrics_match_independent_audit"] = (
+            measured["queue_samples"] == len(final_rows)
+            and measured["model_samples"] == len(calls)
+            and measured["cache_hits"] == 1
+            and measured["cache_lookups"] == len(final_rows)
+            and all(
+                snapshot["metrics"]["gauges"]
+                == {"model_active": 0, "model_peak": by_pid[str(snapshot["pid"])]}
+                for snapshot in snapshots
+            )
+        )
+        # Deliberately exercise the duplicate detector, then roll back the probe.
+        with psycopg.connect(args.dsn) as probe_connection:
+            probe_connection.execute("SAVEPOINT audit_probe")
+            probe_connection.execute(
+                "UPDATE resume_cloud_tasks SET completed_at=completed_at+interval '1 second' "
+                "WHERE id=%s",
+                (original["id"],),
+            )
+            count = probe_connection.execute(
+                "SELECT count(*) FROM evaluation.terminal_events WHERE task_id=%s",
+                (original["id"],),
+            ).fetchone()
+            checks["audit_detects_rolled_back_duplicate_probe"] = (
+                count is not None and count[0] == 2
+            )
+            probe_connection.execute("ROLLBACK TO SAVEPOINT audit_probe")
+        report["metrics"] = measured
         report.update(
             {
                 "requests": {
@@ -826,9 +873,7 @@ def run(args: argparse.Namespace) -> tuple[Path, bool]:
                     "aggregate_peak": peak(calls),
                     "aggregate_limit": args.workers * args.threads,
                 },
-                "worker_snapshots": [
-                    json.loads(path.read_text()) for path in sorted(run_dir.glob("worker-*.json"))
-                ],
+                "worker_snapshots": snapshots,
             }
         )
         write_json(run_dir / "terminal-audit.json", audit_rows)

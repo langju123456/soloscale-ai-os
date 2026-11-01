@@ -53,3 +53,8 @@ Reports retain measured samples, source hashes, assertions, and process metadata
 ignored directory. They never retain the synthetic resume, JD, model response, DSN, or bearer
 token. Failure produces a nonzero exit status and a partial report with a safe failure category.
 Only the evaluator's own child processes are stopped; databases and volumes are preserved.
+
+The final harness also cross-checks worker metrics against the independent call audit and
+PostgreSQL rows. It self-tests duplicate detection with a deliberately repeated completion
+update inside a savepoint, then rolls that probe back; it is excluded from workload counts.
+Safe API child PIDs/loopback URLs and worker PIDs are retained for process-boundary evidence.

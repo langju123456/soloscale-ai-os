@@ -12,8 +12,8 @@ one shared bearer token and no tenant identity.
 
 `POST /tasks` uses a PostgreSQL-backed token bucket keyed by `X-Client-ID`. A missing
 header uses the `default` partition, so omission cannot bypass the limit. The capacity and
-refill rate are environment-configurable. A single `INSERT ... ON CONFLICT DO UPDATE ...
-RETURNING` spends/refills each existing bucket; the task insert resolves idempotency first,
+refill rate are environment-configurable. After conflict-safe bucket initialization, one atomic `UPDATE ... RETURNING`
+spends/refills the bucket; the task insert resolves idempotency first,
 then a newly inserted task consumes its bucket inside the same database transaction. A replay
 or payload conflict therefore spends no token; a rejected new request rolls back both the task
 and its bucket mutation. The update clamps backwards clocks and never moves the stored timestamp
