@@ -10,6 +10,12 @@ ALTER TABLE resume_cloud_tasks
     ADD COLUMN raw_resume_sha256 CHAR(64),
     ADD COLUMN job_description_sha256 CHAR(64);
 
+-- v2 did not persist a client label.  Preserve its single legacy identity as
+-- the API's no-header partition, while retaining NULL content hashes so those
+-- historical tasks cannot enter the result cache.
+UPDATE resume_cloud_tasks
+    SET client_key = '37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f';
+
 CREATE TABLE resume_cloud_result_cache (
     client_key CHAR(64) NOT NULL,
     raw_resume_sha256 CHAR(64) NOT NULL,

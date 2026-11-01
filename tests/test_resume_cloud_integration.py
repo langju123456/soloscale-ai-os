@@ -27,7 +27,7 @@ from soloscale.model_gateway import (
 from soloscale.resume_cloud_api import create_app
 from soloscale.resume_cloud_models import TaskMode
 from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
-from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService
+from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService, prepare_cloud_input
 
 DATABASE_URL = os.environ.get("CLOUD_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="requires CLOUD_TEST_DATABASE_URL")
@@ -527,6 +527,60 @@ def test_migrator_rerun_accepts_exact_v3_schema() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_v2_task_migration_replays_as_legacy_default_client() -> None:
+    """v2 did not retain client labels, so all existing rows use the default partition."""
+    assert DATABASE_URL is not None
+    payload = _payload()
+    from soloscale.resume_cloud_models import CreateTaskRequest
+
+    request = CreateTaskRequest.model_validate(payload)
+    template, jd, payload_hash, _, _ = prepare_cloud_input(request)
+    key = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE resume_cloud_result_cache")
+        cur.execute(
+            "ALTER TABLE resume_cloud_tasks DROP COLUMN client_key, "
+            "DROP COLUMN raw_resume_sha256, DROP COLUMN job_description_sha256"
+        )
+        cur.execute(
+            "ALTER TABLE resume_cloud_schema_version DROP CONSTRAINT "
+            "resume_cloud_schema_version_version_check"
+        )
+        cur.execute("UPDATE resume_cloud_schema_version SET version=2")
+        cur.execute(
+            "ALTER TABLE resume_cloud_schema_version ADD CONSTRAINT "
+            "resume_cloud_schema_version_version_check CHECK (version IN (1, 2))"
+        )
+        cur.execute(
+            """INSERT INTO resume_cloud_tasks
+            (id,idempotency_key,payload_sha256,state,mode,approve_external_model_call,
+             resume_docx,job_description,input_expires_at)
+            VALUES (%s,%s,%s,'PREPARED','template',FALSE,%s,%s,now() + interval '1 hour')""",
+            (task_id, key, payload_hash, template, jd),
+        )
+    result = subprocess.run(
+        [sys.executable, Path(__file__).parents[1] / "scripts" / "migrate_resume_cloud.py"],
+        env={**os.environ, "RESUME_CLOUD_DATABASE_URL": DATABASE_URL},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    client = TestClient(create_app(CloudSettings(database_url=DATABASE_URL, bearer_token="t" * 32)))
+    replay = client.post(
+        "/tasks",
+        json=payload,
+        headers={"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": key},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == task_id
+    task = ResumeCloudRepository(DATABASE_URL).get(task_id)
+    assert task is not None
+    assert task.client_key == "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f"
+    assert task.raw_resume_sha256 is None and task.job_description_sha256 is None
 
 
 def test_migrator_refuses_v3_relations_with_v1_version() -> None:
