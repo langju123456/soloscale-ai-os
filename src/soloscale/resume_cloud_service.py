@@ -40,7 +40,11 @@ class CloudSettings:
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     def __post_init__(self) -> None:
-        if self.rate_limit_capacity < 1 or not math.isfinite(self.rate_limit_refill_per_second) or self.rate_limit_refill_per_second <= 0:
+        if (
+            self.rate_limit_capacity < 1
+            or not math.isfinite(self.rate_limit_refill_per_second)
+            or self.rate_limit_refill_per_second <= 0
+        ):
             raise ValueError("rate limit settings must be finite and positive")
 
     @classmethod

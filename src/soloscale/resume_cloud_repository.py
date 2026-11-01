@@ -128,7 +128,7 @@ class ResumeCloudRepository:
                   updated_at = GREATEST(limits.updated_at, %s::timestamptz),
                   last_allowed = available.tokens >= 1
                 FROM available WHERE limits.client_id=%s
-                RETURNING last_allowed, tokens""",
+                RETURNING limits.last_allowed, limits.tokens""",
                 (capacity, now, refill_per_second, client_id, now, client_id),
             )
             row = cur.fetchone()
