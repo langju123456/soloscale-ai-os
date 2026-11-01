@@ -38,6 +38,7 @@ class CloudSettings:
     rate_limit_capacity: int = 20
     rate_limit_refill_per_second: float = 1.0
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    max_model_concurrency: int = 1
 
     def __post_init__(self) -> None:
         if (
@@ -46,6 +47,8 @@ class CloudSettings:
             or self.rate_limit_refill_per_second <= 0
         ):
             raise ValueError("rate limit settings must be finite and positive")
+        if self.max_model_concurrency < 1:
+            raise ValueError("max_model_concurrency must be positive")
 
     @classmethod
     def from_environment(cls, *, require_bearer: bool = True) -> CloudSettings:
@@ -59,6 +62,7 @@ class CloudSettings:
             raise RuntimeError("RESUME_CLOUD_DATABASE_URL and a 32+ byte bearer token are required")
         capacity = int(os.environ.get("RESUME_CLOUD_RATE_LIMIT_CAPACITY", "20"))
         refill = float(os.environ.get("RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND", "1"))
+        model_concurrency = int(os.environ.get("RESUME_CLOUD_MODEL_CONCURRENCY", "1"))
         if capacity < 1 or not math.isfinite(refill) or refill <= 0:
             raise RuntimeError("Resume cloud rate limit settings must be finite and positive")
         return cls(
@@ -66,6 +70,7 @@ class CloudSettings:
             bearer_token=bearer_token,
             rate_limit_capacity=capacity,
             rate_limit_refill_per_second=refill,
+            max_model_concurrency=model_concurrency,
         )
 
 
@@ -124,6 +129,7 @@ class ResumeCloudService:
     def __init__(self, repository: ResumeCloudRepository, settings: CloudSettings) -> None:
         self.repository = repository
         self.settings = settings
+        self._model_slots = threading.BoundedSemaphore(settings.max_model_concurrency)
 
     def create(self, payload: CreateTaskRequest, idempotency_key: str) -> tuple[CloudTask, bool]:
         template, jd, payload_hash = prepare_cloud_input(payload)
@@ -186,16 +192,24 @@ class ResumeCloudService:
                 selected_gateway = gateway or self.configured_gateway()
                 if selected_gateway is None:
                     raise RuntimeError("MODEL_NOT_CONFIGURED")
-                if not self.repository.mark_model_call(task.id, task.worker_token):
-                    raise RuntimeError("TASK_LEASE_LOST")
-                with _LeaseHeartbeat(
-                    self.repository, task, self.settings.lease_seconds
-                ) as heartbeat:
-                    output = tailor_resume_docx_with_gateway(
-                        task.resume_docx, task.job_description, gateway=selected_gateway
-                    ).content
-                    if heartbeat.lost.is_set():
+                # The worker acquires a process-local slot before claiming work. This
+                # guard remains defensive for direct service callers.
+                if not self._model_slots.acquire(blocking=False):
+                    self.repository.defer(task.id, task.worker_token)
+                    return self.repository.get(task.id)
+                try:
+                    if not self.repository.mark_model_call(task.id, task.worker_token):
                         raise RuntimeError("TASK_LEASE_LOST")
+                    with _LeaseHeartbeat(
+                        self.repository, task, self.settings.lease_seconds
+                    ) as heartbeat:
+                        output = tailor_resume_docx_with_gateway(
+                            task.resume_docx, task.job_description, gateway=selected_gateway
+                        ).content
+                        if heartbeat.lost.is_set():
+                            raise RuntimeError("TASK_LEASE_LOST")
+                finally:
+                    self._model_slots.release()
             self.repository.complete(
                 task.id, task.worker_token, output, self.settings.output_ttl_hours
             )
