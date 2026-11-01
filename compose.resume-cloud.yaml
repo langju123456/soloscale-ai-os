@@ -19,6 +19,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.resume-cloud
+      args: {RESUME_CLOUD_EXTRAS: "${RESUME_CLOUD_EXTRAS:-cloud}"}
     environment:
       RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
     secrets: [postgres_password]
@@ -36,6 +37,9 @@ services:
       RESUME_CLOUD_TRACING: ${RESUME_CLOUD_TRACING:-false}
       RESUME_CLOUD_TRACE_EXPORTER: ${RESUME_CLOUD_TRACE_EXPORTER:-console}
       RESUME_CLOUD_OTLP_ENDPOINT: ${RESUME_CLOUD_OTLP_ENDPOINT:-}
+      RESUME_CLOUD_RATE_LIMIT_CAPACITY: ${RESUME_CLOUD_RATE_LIMIT_CAPACITY:-20}
+      RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND: ${RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND:-1}
+      RESUME_CLOUD_MODEL_CONCURRENCY: ${RESUME_CLOUD_MODEL_CONCURRENCY:-1}
     secrets: [postgres_password, api_bearer_token]
     user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
     entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_api"]
@@ -49,11 +53,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.resume-cloud
+      args: {RESUME_CLOUD_EXTRAS: "${RESUME_CLOUD_EXTRAS:-cloud}"}
     environment:
       RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
       RESUME_CLOUD_TRACING: ${RESUME_CLOUD_TRACING:-false}
       RESUME_CLOUD_TRACE_EXPORTER: ${RESUME_CLOUD_TRACE_EXPORTER:-console}
       RESUME_CLOUD_OTLP_ENDPOINT: ${RESUME_CLOUD_OTLP_ENDPOINT:-}
+      RESUME_CLOUD_RATE_LIMIT_CAPACITY: ${RESUME_CLOUD_RATE_LIMIT_CAPACITY:-20}
+      RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND: ${RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND:-1}
+      RESUME_CLOUD_MODEL_CONCURRENCY: ${RESUME_CLOUD_MODEL_CONCURRENCY:-1}
     secrets: [postgres_password]
     user: "${RESUME_CLOUD_UID:-10001}:${RESUME_CLOUD_GID:-10001}"
     entrypoint: ["sh", "-c", "export PGPASSWORD=$$(cat /run/secrets/postgres_password); python -m soloscale.resume_cloud_worker"]

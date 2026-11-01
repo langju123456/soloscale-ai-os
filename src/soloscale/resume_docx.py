@@ -31,6 +31,7 @@ from pydantic import (
 )
 
 from soloscale.model_gateway import ModelCallProfile, ModelGateway
+from soloscale.resume_cloud_observability import traced_stage
 from soloscale.resume_evidence_pack import (
     build_candidate_evidence_pack,
     build_composition_evidence_plan,
@@ -338,9 +339,8 @@ def _remove_trailing_empty_paragraphs(body: ElementTree.Element) -> int:
 def _is_bullet(paragraph: ElementTree.Element) -> bool:
     properties = paragraph.find(f"{_W}pPr")
     return (
-        (properties is not None and properties.find(f"{_W}numPr") is not None)
-        or _paragraph_text(paragraph).startswith("•")
-    )
+        properties is not None and properties.find(f"{_W}numPr") is not None
+    ) or _paragraph_text(paragraph).startswith("•")
 
 
 def _validate_member(info: zipfile.ZipInfo) -> None:
@@ -410,9 +410,7 @@ def _canonical_section_heading(value: str) -> str | None:
     return _CANONICAL_SECTION_HEADINGS.get(normalized)
 
 
-def apply_resume_template_structure(
-    template: bytes, section_order: list[str]
-) -> bytes:
+def apply_resume_template_structure(template: bytes, section_order: list[str]) -> bytes:
     """Apply a confirmed section order without importing any template copy."""
 
     requested: list[str] = []
@@ -427,8 +425,7 @@ def apply_resume_template_structure(
     section_markers = [
         (index, _canonical_section_heading(_paragraph_text(child)))
         for index, child in enumerate(children)
-        if child.tag == f"{_W}p"
-        and _canonical_section_heading(_paragraph_text(child)) is not None
+        if child.tag == f"{_W}p" and _canonical_section_heading(_paragraph_text(child)) is not None
     ]
     if not section_markers:
         return template
@@ -522,6 +519,7 @@ def _nonblank_text(paragraphs: Iterable[TemplateParagraph]) -> list[str]:
     return [paragraph.text for paragraph in paragraphs if paragraph.text]
 
 
+@traced_stage("pipeline.extract_candidate_profile")
 def extract_candidate_profile(template: bytes) -> CandidateProfile:
     """Build operator-supplied profile facts from the uploaded resume only."""
     paragraphs = read_template_paragraphs(template)
@@ -585,10 +583,7 @@ def _section_bounds(
             index
             for index, child in enumerate(children[start + 1 :], start=start + 1)
             if child.tag == f"{_W}sectPr"
-            or (
-                child.tag == f"{_W}p"
-                and _heading(_paragraph_text(child)) in _SECTION_HEADINGS
-            )
+            or (child.tag == f"{_W}p" and _heading(_paragraph_text(child)) in _SECTION_HEADINGS)
         ),
         len(children),
     )
@@ -619,9 +614,7 @@ def _project_blocks(
     for child in section:
         text = _paragraph_text(child) if child.tag == f"{_W}p" else ""
         starts_next_project = (
-            text
-            and not _is_bullet(child)
-            and any(_is_bullet(item) for item in current)
+            text and not _is_bullet(child) and any(_is_bullet(item) for item in current)
         )
         if starts_next_project:
             blocks.append(current)
@@ -701,15 +694,10 @@ def _profile_entries(profile: CandidateProfile) -> dict[str, str]:
 
 
 def _profile_skills(profile: CandidateProfile) -> dict[str, str]:
-    return {
-        f"SKILL-{index:02d}": text
-        for index, text in enumerate(profile.skills, start=1)
-    }
+    return {f"SKILL-{index:02d}": text for index, text in enumerate(profile.skills, start=1)}
 
 
-def _section_bullet_elements(
-    body: ElementTree.Element, heading: str
-) -> list[ElementTree.Element]:
+def _section_bullet_elements(body: ElementTree.Element, heading: str) -> list[ElementTree.Element]:
     children = list(body)
     bounds = _section_bounds(children, heading)
     if bounds is None:
@@ -750,9 +738,7 @@ def _rendered_profile_entry_ids(
 ) -> tuple[str, ...]:
     """Record the post-reorder paragraph order for later expert patch application."""
 
-    identity_by_element = {
-        element: entry_id for entry_id, element in entry_elements.items()
-    }
+    identity_by_element = {element: entry_id for entry_id, element in entry_elements.items()}
     rendered = tuple(
         identity_by_element[element]
         for heading in ("WORK EXPERIENCE", "PROJECT HIGHLIGHTS")
@@ -849,11 +835,10 @@ def _exact_role_strategy_model(
         "items": {"enum": fact_ids, "type": "string"},
         "uniqueItems": True,
     }
+
     def rewrite_body_for(entry_id: str) -> type[BaseModel]:
         target_fact_ids = tuple(
-            fact_id
-            for fact_id in fact_ids
-            if fact_id.startswith(f"FACT-{entry_id}-")
+            fact_id for fact_id in fact_ids if fact_id.startswith(f"FACT-{entry_id}-")
         )
 
         class _LegacyGroundedRewriteWireBody(BaseModel):
@@ -868,11 +853,7 @@ def _exact_role_strategy_model(
                 if not isinstance(source_fact_ids, list) or not source_fact_ids:
                     return value
                 target_fact_id = next(
-                    (
-                        fact_id
-                        for fact_id in source_fact_ids
-                        if fact_id in target_fact_ids
-                    ),
+                    (fact_id for fact_id in source_fact_ids if fact_id in target_fact_ids),
                     None,
                 )
                 if target_fact_id is None:
@@ -894,9 +875,7 @@ def _exact_role_strategy_model(
             target_fact_id=(
                 Annotated[
                     str,
-                    AfterValidator(
-                        _allowed_id_validator(target_fact_ids)
-                    ),
+                    AfterValidator(_allowed_id_validator(target_fact_ids)),
                 ],
                 Field(json_schema_extra={"enum": list(target_fact_ids), "type": "string"}),
             ),
@@ -912,6 +891,7 @@ def _exact_role_strategy_model(
                 ),
             ),
         )
+
     summary_body = create_model(
         "GroundedSummaryBody",
         __config__=ConfigDict(extra="forbid"),
@@ -919,9 +899,7 @@ def _exact_role_strategy_model(
         source_fact_ids=(
             Annotated[
                 list[str],
-                AfterValidator(
-                    _allowed_id_list_validator(tuple(fact_ids), minimum=2)
-                ),
+                AfterValidator(_allowed_id_list_validator(tuple(fact_ids), minimum=2)),
             ],
             Field(
                 min_length=2,
@@ -946,9 +924,7 @@ def _exact_role_strategy_model(
             Annotated[
                 list[str],
                 AfterValidator(
-                    _exact_priority_validator(
-                        tuple(entry_ids), field_name="evidence_priority"
-                    )
+                    _exact_priority_validator(tuple(entry_ids), field_name="evidence_priority")
                 ),
             ],
             Field(
@@ -961,9 +937,7 @@ def _exact_role_strategy_model(
             Annotated[
                 list[str],
                 AfterValidator(
-                    _exact_priority_validator(
-                        tuple(skill_ids), field_name="skill_priority"
-                    )
+                    _exact_priority_validator(tuple(skill_ids), field_name="skill_priority")
                 ),
             ],
             Field(
@@ -985,6 +959,7 @@ def _exact_role_strategy_model(
     )
 
 
+@traced_stage("pipeline.role_strategy")
 def _role_strategy_from_exact(
     response: BaseModel,
     *,
@@ -1005,9 +980,7 @@ def _role_strategy_from_exact(
         raise ResumeTemplateError("AI role strategy requested an unknown profile entry")
     own_fact_ids = {
         entry_id: [
-            fact_id
-            for fact_id, source_id in fact_source_by_id.items()
-            if source_id == entry_id
+            fact_id for fact_id, source_id in fact_source_by_id.items() if source_id == entry_id
         ]
         for entry_id in entry_ids
     }
@@ -1036,33 +1009,23 @@ def _role_strategy_from_exact(
             )
             continue
         if not isinstance(body, dict):
-            raise ResumeTemplateError(
-                "AI role strategy omitted an approved profile entry"
-            )
+            raise ResumeTemplateError("AI role strategy omitted an approved profile entry")
         target_fact_id = body.get("target_fact_id")
         supporting_fact_ids = body.get("supporting_fact_ids")
-        if not isinstance(target_fact_id, str) or not isinstance(
-            supporting_fact_ids, list
-        ) or any(
-            not isinstance(value, str) for value in supporting_fact_ids
+        if (
+            not isinstance(target_fact_id, str)
+            or not isinstance(supporting_fact_ids, list)
+            or any(not isinstance(value, str) for value in supporting_fact_ids)
         ):
-            raise ResumeTemplateError(
-                "AI role strategy returned invalid atomic fact references"
-            )
+            raise ResumeTemplateError("AI role strategy returned invalid atomic fact references")
         fact_ids = list(dict.fromkeys([target_fact_id, *supporting_fact_ids]))
         try:
-            source_ids = list(
-                dict.fromkeys(fact_source_by_id[fact_id] for fact_id in fact_ids)
-            )
+            source_ids = list(dict.fromkeys(fact_source_by_id[fact_id] for fact_id in fact_ids))
         except KeyError as error:
             raise ResumeTemplateError(
                 "AI role strategy referenced an unknown atomic fact"
             ) from error
-        if (
-            body.get("kind") == "SYNTHESIS"
-            and len(fact_ids) == 1
-            and source_ids == [entry_id]
-        ):
+        if body.get("kind") == "SYNTHESIS" and len(fact_ids) == 1 and source_ids == [entry_id]:
             body["kind"] = "REWRITE"
         rewrites.append(
             {
@@ -1080,9 +1043,7 @@ def _role_strategy_from_exact(
     ):
         raise ResumeTemplateError("AI role strategy returned an invalid skill priority")
     try:
-        payload["skill_priority"] = [
-            sanitized_skill_by_id[skill_id] for skill_id in skill_priority
-        ]
+        payload["skill_priority"] = [sanitized_skill_by_id[skill_id] for skill_id in skill_priority]
     except KeyError as error:
         raise ResumeTemplateError(
             "AI role strategy referenced an unknown approved skill"
@@ -1093,14 +1054,10 @@ def _role_strategy_from_exact(
         if not isinstance(summary_fact_ids, list) or any(
             not isinstance(value, str) for value in summary_fact_ids
         ):
-            raise ResumeTemplateError(
-                "AI role strategy returned invalid Summary fact references"
-            )
+            raise ResumeTemplateError("AI role strategy returned invalid Summary fact references")
         try:
             summary["source_profile_entry_ids"] = list(
-                dict.fromkeys(
-                    fact_source_by_id[fact_id] for fact_id in summary_fact_ids
-                )
+                dict.fromkeys(fact_source_by_id[fact_id] for fact_id in summary_fact_ids)
             )
         except KeyError as error:
             raise ResumeTemplateError(
@@ -1141,9 +1098,7 @@ def _is_material_requested_project_rewrite(source: str, rewritten: str) -> bool:
     """A deterministic 25%-change text proxy, not proof of semantic quality."""
 
     source_tokens = "".join(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", source)).casefold()
-    rewritten_tokens = "".join(
-        re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", rewritten)
-    ).casefold()
+    rewritten_tokens = "".join(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", rewritten)).casefold()
     if source_tokens == rewritten_tokens or min(len(source_tokens), len(rewritten_tokens)) < 8:
         return False
     return SequenceMatcher(None, source_tokens, rewritten_tokens).ratio() <= 0.75
@@ -1252,9 +1207,7 @@ _FACT_ACTION_TERMS = {
 }
 _NUMBER_RE = re.compile(r"(?<!\w)\d+(?:[.,]\d+)?%?\+?(?!\w)")
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9+#./-]*")
-_ZH_INFLATION_TERMS: tuple[
-    tuple[tuple[str, ...], ResumeValidationRuleCode], ...
-] = (
+_ZH_INFLATION_TERMS: tuple[tuple[tuple[str, ...], ResumeValidationRuleCode], ...] = (
     (("主导", "领导", "带领", "全权负责"), ResumeValidationRuleCode.CLAIM_ROLE_INFLATION),
     (("客户", "付费用户"), ResumeValidationRuleCode.CLAIM_CLIENT_INFLATION),
     (
@@ -1263,8 +1216,15 @@ _ZH_INFLATION_TERMS: tuple[
     ),
     (
         (
-            "提升", "提高", "显著提升", "大幅提升", "大幅降低", "收入增长", "节省成本",
-            "确保数据完整性", "确保数据一致性",
+            "提升",
+            "提高",
+            "显著提升",
+            "大幅提升",
+            "大幅降低",
+            "收入增长",
+            "节省成本",
+            "确保数据完整性",
+            "确保数据一致性",
         ),
         ResumeValidationRuleCode.CLAIM_OUTCOME_INFLATION,
     ),
@@ -1290,10 +1250,7 @@ _ZH_FACT_ANCHOR_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _normalized_words(text: str) -> set[str]:
-    return {
-        token.casefold()
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9+#.]*", text)
-    }
+    return {token.casefold() for token in re.findall(r"[A-Za-z][A-Za-z0-9+#.]*", text)}
 
 
 def _fact_anchor_terms(text: str) -> set[str]:
@@ -1321,9 +1278,7 @@ def _cross_locale_fact_match(
 ) -> bool:
     """Match only curated semantic anchors when source and target languages differ."""
 
-    source_has_chinese = any(
-        "\u4e00" <= character <= "\u9fff" for character in source_fact
-    )
+    source_has_chinese = any("\u4e00" <= character <= "\u9fff" for character in source_fact)
     if target_locale == "zh-CN" and not source_has_chinese:
         return any(
             alias in candidate_claim
@@ -1332,8 +1287,7 @@ def _cross_locale_fact_match(
         )
     if target_locale == "en-US" and source_has_chinese:
         return any(
-            anchor in candidate_terms
-            and any(alias in source_fact for alias in chinese_aliases)
+            anchor in candidate_terms and any(alias in source_fact for alias in chinese_aliases)
             for anchor, chinese_aliases in _ZH_FACT_ANCHOR_ALIASES.items()
         )
     return False
@@ -1418,8 +1372,7 @@ def _validate_role_strategy(
 ) -> dict[str, str] | tuple[dict[str, str], tuple[ResumeEditorialReviewWarning, ...]]:
     entries = _profile_entries(profile)
     atomic_fact_by_id = {
-        item.fact_id: item
-        for item in (atomic_facts or build_resume_atomic_facts(profile))
+        item.fact_id: item for item in (atomic_facts or build_resume_atomic_facts(profile))
     }
     expected_ids = set(entries)
     failures: list[ResumeValidationFailure] = []
@@ -1451,9 +1404,7 @@ def _validate_role_strategy(
         if source_span:
             source_span_failure_count += 1
 
-    def warn_lexical_anchor(
-        *, json_path: str, claim_id: str, fact_id: str
-    ) -> None:
+    def warn_lexical_anchor(*, json_path: str, claim_id: str, fact_id: str) -> None:
         editorial_warnings.append(
             ResumeEditorialReviewWarning(
                 code="LEXICAL_ANCHOR_NOT_CONFIRMED",
@@ -1527,9 +1478,7 @@ def _validate_role_strategy(
                 )
                 continue
             resolved_facts.append(fact)
-        resolved_source_ids = list(
-            dict.fromkeys(fact.profile_entry_id for fact in resolved_facts)
-        )
+        resolved_source_ids = list(dict.fromkeys(fact.profile_entry_id for fact in resolved_facts))
         if not missing_fact_reference and resolved_source_ids != source_ids:
             reject(
                 ResumeValidationRuleCode.CLAIM_SOURCE_MISMATCH,
@@ -1540,11 +1489,7 @@ def _validate_role_strategy(
 
         output_terms = _terms(text)
         for source_id in source_ids:
-            attributed = [
-                fact
-                for fact in resolved_facts
-                if fact.profile_entry_id == source_id
-            ]
+            attributed = [fact for fact in resolved_facts if fact.profile_entry_id == source_id]
             if not attributed:
                 reject(
                     ResumeValidationRuleCode.CLAIM_NO_EVIDENCE,
@@ -1555,8 +1500,7 @@ def _validate_role_strategy(
         for fact in resolved_facts:
             exact_profile_fact_identity_match = (
                 fact.source_kind == "PROFILE_ENTRY"
-                and _exact_profile_fact_identity(fact.text)
-                == _exact_profile_fact_identity(text)
+                and _exact_profile_fact_identity(fact.text) == _exact_profile_fact_identity(text)
             )
             fact_anchors = _fact_anchor_terms(fact.text)
             if output_locale == "zh-CN":
@@ -1610,12 +1554,11 @@ def _validate_role_strategy(
             - allowed_numbers
             - localized_protected_allowlist
         )
-        invented_numbers = {
-            match.group(0).casefold() for match in _NUMBER_RE.finditer(text)
-        } - {
-            match.group(0).casefold()
-            for match in _NUMBER_RE.finditer(source_union)
-        } - allowed_numbers
+        invented_numbers = (
+            {match.group(0).casefold() for match in _NUMBER_RE.finditer(text)}
+            - {match.group(0).casefold() for match in _NUMBER_RE.finditer(source_union)}
+            - allowed_numbers
+        )
         output_words = _normalized_words(text) | _terms(text)
         introduced_words = output_words - source_words
         if invented_numbers:
@@ -1653,10 +1596,7 @@ def _validate_role_strategy(
                 if any(
                     phrase in text
                     and phrase not in source_union
-                    and not (
-                        phrase in {"提升", "提高"}
-                        and "improved" in source_words
-                    )
+                    and not (phrase in {"提升", "提高"} and "improved" in source_words)
                     for phrase in phrases
                 ):
                     reject(rule_code, f"{json_path}.text", claim_id=claim_id)
@@ -1763,6 +1703,7 @@ _SELECTIVE_REWRITE_FAILURES = {
 }
 
 
+@traced_stage("pipeline.select_safe_rewrites")
 def _select_safe_rewrites(
     strategy: RoleStrategy,
     *,
@@ -1786,21 +1727,16 @@ def _select_safe_rewrites(
     except ResumeTemplateError as error:
         diagnostics = error.validation_diagnostics
         if diagnostics is None or any(
-            failure.rule_code not in _SELECTIVE_REWRITE_FAILURES
-            or failure.claim_id is None
+            failure.rule_code not in _SELECTIVE_REWRITE_FAILURES or failure.claim_id is None
             for failure in diagnostics.failures
         ):
             raise
         rejected_ids = {
-            failure.claim_id
-            for failure in diagnostics.failures
-            if failure.claim_id is not None
+            failure.claim_id for failure in diagnostics.failures if failure.claim_id is not None
         }
         fallback_fact_ids_by_source: dict[str, list[str]] = {}
         for fact in build_resume_atomic_facts(profile):
-            fallback_fact_ids_by_source.setdefault(fact.profile_entry_id, []).append(
-                fact.fact_id
-            )
+            fallback_fact_ids_by_source.setdefault(fact.profile_entry_id, []).append(fact.fact_id)
         selected_rewrites = [
             GroundedResumeBulletRewrite(
                 profile_entry_id=rewrite.profile_entry_id,
@@ -1839,13 +1775,16 @@ def _select_safe_rewrites(
             ),
         )
     verified_count = sum(
-        rewrite.text == entries[rewrite.profile_entry_id]
-        for rewrite in strategy.bullet_rewrites
+        rewrite.text == entries[rewrite.profile_entry_id] for rewrite in strategy.bullet_rewrites
     ) + int(profile.summary is not None and strategy.summary_rewrite is None)
-    supported_count = len(entries) - sum(
-        rewrite.text == entries[rewrite.profile_entry_id]
-        for rewrite in strategy.bullet_rewrites
-    ) + int(strategy.summary_rewrite is not None)
+    supported_count = (
+        len(entries)
+        - sum(
+            rewrite.text == entries[rewrite.profile_entry_id]
+            for rewrite in strategy.bullet_rewrites
+        )
+        + int(strategy.summary_rewrite is not None)
+    )
     return (
         strategy,
         entries,
@@ -1921,13 +1860,9 @@ def _build_evidence_adoption_trace(
         for rewrite in raw_strategy.bullet_rewrites
     }
     if raw_strategy.summary_rewrite is not None:
-        raw_fact_ids_by_claim["SUMMARY"] = set(
-            raw_strategy.summary_rewrite.source_fact_ids
-        )
+        raw_fact_ids_by_claim["SUMMARY"] = set(raw_strategy.summary_rewrite.source_fact_ids)
     proposed_fact_ids = (
-        set().union(*raw_fact_ids_by_claim.values())
-        if raw_fact_ids_by_claim
-        else set()
+        set().union(*raw_fact_ids_by_claim.values()) if raw_fact_ids_by_claim else set()
     )
     accepted_fact_ids: set[str] = set()
     for rewrite in selected_strategy.bullet_rewrites:
@@ -1949,14 +1884,13 @@ def _build_evidence_adoption_trace(
             proposed=fact.fact_id in proposed_fact_ids,
             accepted=fact.fact_id in accepted_fact_ids,
             rendered=fact.fact_id in accepted_fact_ids,
-            rejection_rule_codes=list(
-                dict.fromkeys(rejection_codes.get(fact.fact_id, []))
-            ),
+            rejection_rule_codes=list(dict.fromkeys(rejection_codes.get(fact.fact_id, []))),
         )
         for fact in facts
     )
 
 
+@traced_stage("pipeline.render_projects")
 def _reorder_project_blocks_by_priority(
     body: ElementTree.Element,
     children: list[ElementTree.Element],
@@ -1988,6 +1922,7 @@ def _reorder_project_blocks_by_priority(
     return reordered_count
 
 
+@traced_stage("pipeline.render_skills")
 def _reorder_skill_bullets_by_priority(
     body: ElementTree.Element,
     children: list[ElementTree.Element],
@@ -2018,9 +1953,7 @@ def _reorder_skill_bullets_by_priority(
     return reordered_count
 
 
-def _replace_bullet_element_text(
-    paragraph: ElementTree.Element, *, replacement_text: str
-) -> None:
+def _replace_bullet_element_text(paragraph: ElementTree.Element, *, replacement_text: str) -> None:
     if paragraph.tag != f"{_W}p" or not _is_bullet(paragraph):
         raise ResumeTemplateError("Approved profile entry is not a DOCX bullet")
     text_nodes = list(paragraph.iter(f"{_W}t"))
@@ -2073,17 +2006,14 @@ def _replace_summary_text(
         (
             index
             for index, child in enumerate(children[heading_index + 1 :], heading_index + 1)
-            if child.tag == f"{_W}p"
-            and _heading(_paragraph_text(child)) in _SECTION_HEADINGS
+            if child.tag == f"{_W}p" and _heading(_paragraph_text(child)) in _SECTION_HEADINGS
         ),
         len(children),
     )
     matches = [
         child
         for child in children[heading_index + 1 : end]
-        if child.tag == f"{_W}p"
-        and not _is_bullet(child)
-        and _paragraph_text(child) == source_text
+        if child.tag == f"{_W}p" and not _is_bullet(child) and _paragraph_text(child) == source_text
     ]
     if len(matches) != 1:
         return False
@@ -2110,14 +2040,10 @@ def _structured_candidate_artifact(
         "status": status,
         "submission_status": "NOT_FOR_SUBMISSION",
         "label": (
-            "REJECTED / NOT FOR SUBMISSION"
-            if status == "REJECTED"
-            else "NOT FOR SUBMISSION"
+            "REJECTED / NOT FOR SUBMISSION" if status == "REJECTED" else "NOT FOR SUBMISSION"
         ),
         "structured_candidate": strategy.model_dump(mode="json"),
-        "validation_diagnostics": (
-            diagnostics.as_dict() if diagnostics is not None else None
-        ),
+        "validation_diagnostics": (diagnostics.as_dict() if diagnostics is not None else None),
     }
 
 
@@ -2142,14 +2068,10 @@ def tailor_resume_docx_with_gateway(
     skills = _profile_skills(profile)
     entry_ids = list(entries)
     skill_ids = list(skills)
-    candidate_evidence_pack = candidate_evidence_pack or build_candidate_evidence_pack(
-        profile
-    )
+    candidate_evidence_pack = candidate_evidence_pack or build_candidate_evidence_pack(profile)
     atomic_facts = candidate_evidence_pack.atomic_facts
     fact_ids = [item.fact_id for item in atomic_facts]
-    fact_source_by_id = {
-        item.fact_id: item.profile_entry_id for item in atomic_facts
-    }
+    fact_source_by_id = {item.fact_id: item.profile_entry_id for item in atomic_facts}
     requested_edit_ids = _focused_project_edit_ids(
         profile,
         entry_ids=entry_ids,
@@ -2176,16 +2098,13 @@ def tailor_resume_docx_with_gateway(
         profile=profile,
         job_description=job_description,
         tailoring_instructions=tailoring_instructions,
-        template_metadata=template_metadata
-        or ResumeTemplateMetadata(source_format="docx"),
+        template_metadata=template_metadata or ResumeTemplateMetadata(source_format="docx"),
         support_upload=support_upload,
         output_schema=response_schema,
         candidate_evidence_pack=candidate_evidence_pack,
         output_locale=output_locale,
     )
-    if [
-        item.fact_id for item in prepared.payload.candidate_profile.atomic_facts
-    ] != fact_ids:
+    if [item.fact_id for item in prepared.payload.candidate_profile.atomic_facts] != fact_ids:
         raise ResumeTemplateError(
             "Sanitized Resume facts do not match the approved atomic fact identities"
         )
@@ -2315,9 +2234,7 @@ def tailor_resume_docx_with_gateway(
                 "token_usage": token_usage or None,
             }
         )
-        model_call_profile["provider_metrics"] = provider_profile.model_dump(
-            mode="json"
-        )
+        model_call_profile["provider_metrics"] = provider_profile.model_dump(mode="json")
     else:
         model_call_profile.update(
             {
@@ -2376,8 +2293,7 @@ def tailor_resume_docx_with_gateway(
                 raw_strategy,
                 status=(
                     "REJECTED"
-                    if role_strategy_fallback_applied
-                    or validation_diagnostics.rejected_count
+                    if role_strategy_fallback_applied or validation_diagnostics.rejected_count
                     else "VALIDATED"
                 ),
                 diagnostics=validation_diagnostics,
@@ -2392,15 +2308,9 @@ def tailor_resume_docx_with_gateway(
         _paragraph_text(child) for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ]
     rank_by_id = {entry_id: index for index, entry_id in enumerate(strategy.evidence_priority)}
-    priority_by_element = {
-        entry_elements[entry_id]: rank for entry_id, rank in rank_by_id.items()
-    }
-    project_count = _reorder_project_blocks_by_priority(
-        body, list(body), priority_by_element
-    )
-    skill_count = _reorder_skill_bullets_by_priority(
-        body, list(body), strategy.skill_priority
-    )
+    priority_by_element = {entry_elements[entry_id]: rank for entry_id, rank in rank_by_id.items()}
+    project_count = _reorder_project_blocks_by_priority(body, list(body), priority_by_element)
+    skill_count = _reorder_skill_bullets_by_priority(body, list(body), strategy.skill_priority)
     rendered_profile_entry_ids = _rendered_profile_entry_ids(body, entry_elements)
     summary_rewritten = False
     if strategy.summary_rewrite is not None and profile.summary is not None:
@@ -2464,9 +2374,7 @@ def tailor_resume_docx_with_gateway(
     rendered_rewrite_count = len(rendered_changed_claim_ids)
     rendered_unverified_count = len(rendered_warning_claim_ids)
     requested_project_material_rewrites = sum(
-        _is_material_requested_project_rewrite(
-            entries[entry_id], final_rewrite_by_id[entry_id]
-        )
+        _is_material_requested_project_rewrite(entries[entry_id], final_rewrite_by_id[entry_id])
         for entry_id in requested_edit_ids
     )
     requested_project_rewrite_quality_status = (
@@ -2540,9 +2448,7 @@ def tailor_resume_docx_with_gateway(
         role_strategy_fallback_code=role_strategy_fallback_code,
         requested_edit_profile_entry_ids=requested_edit_ids,
         requested_project_material_rewrites=requested_project_material_rewrites,
-        requested_project_rewrite_quality_status=(
-            requested_project_rewrite_quality_status
-        ),
+        requested_project_rewrite_quality_status=(requested_project_rewrite_quality_status),
     )
 
 
@@ -2557,9 +2463,7 @@ def request_resume_expert_review(
 
     strategy = tailored.role_strategy
     if strategy is None:
-        raise ResumeTemplateError(
-            "Expert review requires an evidence-grounded AI draft"
-        )
+        raise ResumeTemplateError("Expert review requires an evidence-grounded AI draft")
     approved_entries = _profile_entries(profile)
     atomic_fact_by_id = {
         item.fact_id: item
@@ -2569,9 +2473,7 @@ def request_resume_expert_review(
             else build_resume_atomic_facts(profile)
         )
     }
-    rewrite_by_id = {
-        rewrite.profile_entry_id: rewrite for rewrite in strategy.bullet_rewrites
-    }
+    rewrite_by_id = {rewrite.profile_entry_id: rewrite for rewrite in strategy.bullet_rewrites}
     if set(rewrite_by_id) != set(approved_entries):
         raise ResumeTemplateError("Expert review cannot resolve the approved draft")
     return gateway.complete(
@@ -2628,38 +2530,27 @@ def apply_resume_expert_review(
 
     strategy = tailored.role_strategy
     if strategy is None:
-        raise ResumeTemplateError(
-            "Expert review requires an evidence-grounded AI draft"
-        )
+        raise ResumeTemplateError("Expert review requires an evidence-grounded AI draft")
     approved_entries = _profile_entries(profile)
-    rewrite_by_id = {
-        rewrite.profile_entry_id: rewrite for rewrite in strategy.bullet_rewrites
-    }
+    rewrite_by_id = {rewrite.profile_entry_id: rewrite for rewrite in strategy.bullet_rewrites}
     if set(rewrite_by_id) != set(approved_entries):
         raise ResumeTemplateError("Expert review cannot resolve the approved draft")
     allowed_ids = set(approved_entries)
     if any(
         patch.profile_entry_id not in allowed_ids
         or patch.before_sha256
-        != hashlib.sha256(
-            rewrite_by_id[patch.profile_entry_id].text.encode("utf-8")
-        ).hexdigest()
+        != hashlib.sha256(rewrite_by_id[patch.profile_entry_id].text.encode("utf-8")).hexdigest()
         for patch in review.patches
     ):
         raise ResumeTemplateError("Expert review patch does not match the approved draft")
     if any(patch.new_factual_claims for patch in review.patches):
         raise ResumeTemplateError("Expert review proposed unsupported factual claims")
-    if any(
-        entry_id not in allowed_ids
-        for entry_id in review.omitted_high_value_profile_entry_ids
-    ):
+    if any(entry_id not in allowed_ids for entry_id in review.omitted_high_value_profile_entry_ids):
         raise ResumeTemplateError("Expert review referenced an unknown approved fact")
 
     patch_by_id = {patch.profile_entry_id: patch for patch in review.patches}
     updated_rewrites = [
-        rewrite.model_copy(
-            update={"text": patch_by_id[rewrite.profile_entry_id].after}
-        )
+        rewrite.model_copy(update={"text": patch_by_id[rewrite.profile_entry_id].after})
         if rewrite.profile_entry_id in patch_by_id
         else rewrite
         for rewrite in strategy.bullet_rewrites
@@ -2704,8 +2595,7 @@ def apply_resume_expert_review(
                 element_by_entry_id[entry_id], replacement_text=patch.after
             )
         final_text_by_id = {
-            entry_id: _paragraph_text(element)
-            for entry_id, element in element_by_entry_id.items()
+            entry_id: _paragraph_text(element) for entry_id, element in element_by_entry_id.items()
         }
     else:
         for entry_id, patch in patch_by_id.items():
@@ -2715,16 +2605,13 @@ def apply_resume_expert_review(
                 replacement_text=patch.after,
             )
         final_text_by_id = {
-            rewrite.profile_entry_id: rewrite.text
-            for rewrite in reviewed_strategy.bullet_rewrites
+            rewrite.profile_entry_id: rewrite.text for rewrite in reviewed_strategy.bullet_rewrites
         }
     if source_paragraph_count != sum(
         1 for child in body if child.tag == f"{_W}p" and _paragraph_text(child)
     ):
         raise ResumeTemplateError("Expert review changed the DOCX paragraph structure")
-    reviewed_document = ElementTree.tostring(
-        root, encoding="utf-8", xml_declaration=True
-    )
+    reviewed_document = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
     target = io.BytesIO()
     with zipfile.ZipFile(target, "w") as archive:
         for info, content in members:
@@ -2736,9 +2623,7 @@ def apply_resume_expert_review(
     finalized_strategy = reviewed_strategy.model_copy(
         update={
             "bullet_rewrites": [
-                rewrite.model_copy(
-                    update={"text": final_text_by_id[rewrite.profile_entry_id]}
-                )
+                rewrite.model_copy(update={"text": final_text_by_id[rewrite.profile_entry_id]})
                 for rewrite in reviewed_strategy.bullet_rewrites
             ]
         }
@@ -2763,17 +2648,13 @@ def apply_resume_expert_review(
             + int(profile.summary is not None)
             - len(rendered_changed_claim_ids)
         ),
-        supported_count=(
-            len(rendered_changed_claim_ids) - len(rendered_warning_claim_ids)
-        ),
+        supported_count=(len(rendered_changed_claim_ids) - len(rendered_warning_claim_ids)),
         rejected_count=0,
         duplicate_count=0,
         source_span_failure_count=0,
         validator_status="accepted",
         editorial_warnings=tuple(
-            warning
-            for warning in expert_warnings
-            if warning.claim_id in rendered_warning_claim_ids
+            warning for warning in expert_warnings if warning.claim_id in rendered_warning_claim_ids
         ),
         unverified_count=len(rendered_warning_claim_ids),
     )
@@ -2786,8 +2667,7 @@ def apply_resume_expert_review(
     requested_project_rewrite_quality_status = (
         "QUALITY_MET"
         if tailored.requested_edit_profile_entry_ids
-        and requested_project_material_rewrites
-        == len(tailored.requested_edit_profile_entry_ids)
+        and requested_project_material_rewrites == len(tailored.requested_edit_profile_entry_ids)
         else "QUALITY_NOT_MET"
         if tailored.requested_edit_profile_entry_ids
         else "NOT_APPLICABLE"
@@ -2799,8 +2679,7 @@ def apply_resume_expert_review(
         grounded_rewrites=final_diagnostics.supported_count,
         unverified_rewrites=final_diagnostics.unverified_count,
         synthesized_rewrites=sum(
-            rewrite.kind == "SYNTHESIS"
-            and rewrite.profile_entry_id in rendered_changed_claim_ids
+            rewrite.kind == "SYNTHESIS" and rewrite.profile_entry_id in rendered_changed_claim_ids
             for rewrite in finalized_strategy.bullet_rewrites
         ),
         validation_diagnostics=final_diagnostics,
@@ -2812,9 +2691,7 @@ def apply_resume_expert_review(
         expert_provider=expert_provider,
         expert_model=expert_model,
         requested_project_material_rewrites=requested_project_material_rewrites,
-        requested_project_rewrite_quality_status=(
-            requested_project_rewrite_quality_status
-        ),
+        requested_project_rewrite_quality_status=(requested_project_rewrite_quality_status),
     )
 
 

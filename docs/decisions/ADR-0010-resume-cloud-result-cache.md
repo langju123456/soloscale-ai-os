@@ -19,8 +19,14 @@ absolute output expiry; it does not refresh or extend retention. Cache expiry is
 the producing task's input and output TTLs, and bounded cleanup removes expired cached bytes.
 Rows created before these hashes exist are not cacheable.
 
-The global idempotency key remains unique. Replays require the same hashed client partition
-and payload; another client receives a conflict without receiving the existing task.
+The global idempotency key remains unique. New rows retain a hashed client partition, so
+replays require the same partition and payload; another client receives a conflict without
+receiving the existing task. Migrated v2 rows have no recoverable partition: their NULL
+partition retains global same-payload replay compatibility, is never backfilled on replay,
+and their NULL content hashes keep them permanently uncacheable.
+
+An unexpired cache entry is preserved on conflict, so a new task cannot slide its expiry.
+An expired entry may be replaced by a newly completed result for the identical key.
 
 ## Alternatives
 

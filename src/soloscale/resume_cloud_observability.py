@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import re
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from contextvars import ContextVar
+from functools import wraps
+from typing import Any, ParamSpec, TypeVar
+
+_ACTIVE_TELEMETRY: ContextVar[Telemetry | None] = ContextVar("resume_cloud_telemetry", default=None)
+_TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
+P = ParamSpec("P")
+T = TypeVar("T")
 
 
 class Telemetry:
@@ -52,7 +60,11 @@ class Telemetry:
             yield
             return
         assert self._trace is not None and self._propagate is not None
-        context = self._propagate.extract({"traceparent": parent}) if parent else None
+        context = (
+            self._propagate.extract({"traceparent": parent})
+            if parent is not None and _TRACEPARENT.fullmatch(parent) and parent[3:35] != "0" * 32
+            else None
+        )
         with self._tracer.start_as_current_span(
             name, context=context, record_exception=False, set_status_on_exception=False
         ) as span:
@@ -110,6 +122,31 @@ class Telemetry:
 
         return TracedGateway()
 
+    @contextmanager
+    def activate(self) -> Iterator[None]:
+        token = _ACTIVE_TELEMETRY.set(self)
+        try:
+            yield
+        finally:
+            _ACTIVE_TELEMETRY.reset(token)
+
     def shutdown(self) -> None:
         if self._provider is not None:
             self._provider.shutdown()
+
+
+def traced_stage(name: str) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    """Add a no-op-unless-active span without changing a pipeline function's result."""
+
+    def decorate(function: Callable[P, T]) -> Callable[P, T]:
+        @wraps(function)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+            telemetry = _ACTIVE_TELEMETRY.get()
+            if telemetry is None:
+                return function(*args, **kwargs)
+            with telemetry.span(name):
+                return function(*args, **kwargs)
+
+        return wrapped
+
+    return decorate

@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from soloscale.models import ContractModel, utc_now
+from soloscale.resume_cloud_observability import traced_stage
 from soloscale.resume_evidence_pack import (
     build_composition_evidence_plan,
     build_jd_positioning_brief,
@@ -86,9 +87,7 @@ _HEADING_ALIASES = {
     "经历": "WORK EXPERIENCE",
     "工作经历": "WORK EXPERIENCE",
 }
-_PRIVATE_PATH_RE = re.compile(
-    r"(?:(?:/Users|/home)/[^\s,;]+|[A-Za-z]:\\[^\r\n,;]+)", re.IGNORECASE
-)
+_PRIVATE_PATH_RE = re.compile(r"(?:(?:/Users|/home)/[^\s,;]+|[A-Za-z]:\\[^\r\n,;]+)", re.IGNORECASE)
 _PRIVATE_PROFILE_URL_RE = re.compile(
     r"(?:https?://)?(?:www\.)?(?:linkedin\.com/in|github\.com)/[A-Za-z0-9._%/~+-]+",
     re.IGNORECASE,
@@ -187,9 +186,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         self.headings: list[str] = []
         self.parts: list[str] = []
 
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         del attrs
         lowered = tag.casefold()
         if lowered in {"script", "style", "noscript", "template", "svg"}:
@@ -289,12 +286,8 @@ class GatewayResumeEntry(ContractModel):
 class GatewayCandidateProfile(ContractModel):
     summary: str | None = Field(default=None, max_length=4_000)
     skills: list[str] = Field(default_factory=list, max_length=80)
-    entries: list[GatewayResumeEntry] = Field(
-        min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES
-    )
-    atomic_facts: list[ResumeAtomicFact] = Field(
-        min_length=1, max_length=MAX_RESUME_ATOMIC_FACTS
-    )
+    entries: list[GatewayResumeEntry] = Field(min_length=1, max_length=MAX_RESUME_PROFILE_ENTRIES)
+    atomic_facts: list[ResumeAtomicFact] = Field(min_length=1, max_length=MAX_RESUME_ATOMIC_FACTS)
 
 
 class GatewaySupportSummary(ContractModel):
@@ -391,9 +384,10 @@ def validate_selected_resume_files(files: list[SelectedResumeFile]) -> None:
     roles = [item.role for item in files]
     if roles.count(ResumeUploadRole.RESUME) != 1:
         raise ResumeUploadError("Select exactly one resume file")
-    if roles.count(ResumeUploadRole.JOB_DESCRIPTION) > 1 or roles.count(
-        ResumeUploadRole.SUPPORT
-    ) > 1:
+    if (
+        roles.count(ResumeUploadRole.JOB_DESCRIPTION) > 1
+        or roles.count(ResumeUploadRole.SUPPORT) > 1
+    ):
         raise ResumeUploadError("Select at most one JD and one supporting file")
     for item in files:
         if not item.content:
@@ -561,9 +555,7 @@ def _pdf_stream_data(
 ) -> bytes:
     """Return exact stream bytes when a direct PDF /Length is available."""
 
-    length_matches = list(
-        re.finditer(rb"/Length\s+(-?\d+)(?:\s+(\d+)\s+R)?", dictionary)
-    )
+    length_matches = list(re.finditer(rb"/Length\s+(-?\d+)(?:\s+(\d+)\s+R)?", dictionary))
     if len(length_matches) != 1 or length_matches[0].group(2) is not None:
         return match.group(1)
     direct_length = int(length_matches[0].group(1))
@@ -584,11 +576,7 @@ def _pdf_stream_dictionary(content: bytes, match: re.Match[bytes]) -> bytes:
     stream_start = match.start()
     lower_bound = max(0, stream_start - _MAX_PDF_OBJECT_HEADER_BYTES)
     previous_endobj = content.rfind(b"endobj", lower_bound, stream_start)
-    object_start = (
-        previous_endobj + len(b"endobj")
-        if previous_endobj >= 0
-        else lower_bound
-    )
+    object_start = previous_endobj + len(b"endobj") if previous_endobj >= 0 else lower_bound
     return content[object_start:stream_start]
 
 
@@ -620,11 +608,7 @@ def _primary_pdf_text(content: bytes) -> tuple[str, int | None]:
                 stream = decompressor.decompress(stream, remaining + 1)
             except zlib.error:
                 continue
-            if (
-                len(stream) > remaining
-                or decompressor.unconsumed_tail
-                or not decompressor.eof
-            ):
+            if len(stream) > remaining or decompressor.unconsumed_tail or not decompressor.eof:
                 raise ResumeUploadError("PDF content expands beyond the safety limit")
         extracted_bytes += len(stream)
         if extracted_bytes > _MAX_PDF_DECOMPRESSED_BYTES:
@@ -636,9 +620,7 @@ def _primary_pdf_text(content: bytes) -> tuple[str, int | None]:
         )
     values: list[str] = []
     for stream in segments:
-        literals = re.findall(
-            rb"\(((?:\\.|[^\\)])*)\)\s*Tj\b", stream, re.DOTALL
-        )
+        literals = re.findall(rb"\(((?:\\.|[^\\)])*)\)\s*Tj\b", stream, re.DOTALL)
         for array in re.findall(rb"\[(.*?)\]\s*TJ\b", stream, re.DOTALL):
             literals.extend(re.findall(rb"\(((?:\\.|[^\\)])*)\)", array, re.DOTALL))
         for literal in literals:
@@ -681,24 +663,15 @@ def _pdf_text_quality(text: str) -> _PDFTextQuality:
 
     replacement_chars = text.count("\ufffd")
     replacement_ratio = replacement_chars / len(characters)
-    printable_ratio = sum(character.isprintable() for character in characters) / len(
-        characters
-    )
-    textual_ratio = sum(character.isalnum() for character in characters) / len(
-        characters
-    )
+    printable_ratio = sum(character.isprintable() for character in characters) / len(characters)
+    textual_ratio = sum(character.isalnum() for character in characters) / len(characters)
     meaningful_lines = sum(
-        len(line) >= 3 and sum(character.isalnum() for character in line) >= 2
-        for line in lines
+        len(line) >= 3 and sum(character.isalnum() for character in line) >= 2 for line in lines
     )
     short_line_ratio = sum(len(line) <= 2 for line in lines) / len(lines)
     wordlike_sequences = re.findall(r"[^\W_]{3,}", text, flags=re.UNICODE)
 
-    fragmented = (
-        len(lines) >= 4
-        and short_line_ratio >= 0.90
-        and meaningful_lines == 0
-    )
+    fragmented = len(lines) >= 4 and short_line_ratio >= 0.90 and meaningful_lines == 0
     # Positioned PDF text may contain readable glyphs and occasional whole words,
     # but still split a resume into hundreds of one/two-character fragments.
     # Recover the complete text with the existing fallback, never truncate lines.
@@ -752,15 +725,11 @@ def _pypdf_text(content: bytes) -> tuple[str, int]:
             if contents is not None:
                 decoded_bytes += len(contents.get_data())
                 if decoded_bytes > _MAX_PDF_DECOMPRESSED_BYTES:
-                    raise ResumeUploadError(
-                        "PDF content expands beyond the safety limit"
-                    )
+                    raise ResumeUploadError("PDF content expands beyond the safety limit")
             page_text = page.extract_text() or ""
             extracted_chars += len(page_text)
             if extracted_chars > _MAX_EXTRACTED_TEXT:
-                raise ResumeUploadError(
-                    "Extracted text exceeds the bounded processing limit"
-                )
+                raise ResumeUploadError("Extracted text exceeds the bounded processing limit")
             if page_text.strip():
                 values.append(page_text.strip())
     except ResumeUploadError:
@@ -885,9 +854,7 @@ def extract_selected_resume_file(item: SelectedResumeFile) -> ExtractedResumeUpl
             except (AssertionError, ValueError) as exc:
                 raise ResumeUploadError("The selected HTML file is malformed") from exc
             text = "\n".join(parser.parts).strip()
-            metadata = _text_template_metadata(
-                "html", text, heading_names=parser.headings
-            )
+            metadata = _text_template_metadata("html", text, heading_names=parser.headings)
         else:
             text = decoded
             metadata = _text_template_metadata(source_format, text)
@@ -966,9 +933,7 @@ def normalize_text_resume_to_docx(text: str) -> bytes:
             continue
         is_explicit_bullet = _BULLET_PREFIX_RE.match(raw_line) is not None
         line = _BULLET_PREFIX_RE.sub("", raw_line).strip()
-        bullet = is_explicit_bullet or (
-            current_section in {"TECHNICAL SKILLS"} and bool(line)
-        )
+        bullet = is_explicit_bullet or (current_section in {"TECHNICAL SKILLS"} and bool(line))
         if bullet and current_section in {"PROJECT HIGHLIGHTS", "WORK EXPERIENCE"}:
             saw_claim_bullet = True
         normalized.append((line, bullet, False))
@@ -1011,16 +976,16 @@ def normalize_text_resume_to_docx(text: str) -> bytes:
         b'<Override PartName="/word/styles.xml" '
         b'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.'
         b'styles+xml"/>'
-        b'</Types>'
+        b"</Types>"
     )
     package_rels = (
         b'<?xml version="1.0" encoding="UTF-8"?>'
-        b'<Relationships '
+        b"<Relationships "
         b'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         b'<Relationship Id="rId1" '
         b'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/'
         b'officeDocument" Target="word/document.xml"/>'
-        b'</Relationships>'
+        b"</Relationships>"
     )
     styles = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -1029,11 +994,11 @@ def normalize_text_resume_to_docx(text: str) -> bytes:
         '<w:name w:val="Normal"/></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading1">'
         '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>'
-        '</w:style></w:styles>'
+        "</w:style></w:styles>"
     ).encode()
     document_rels = (
         b'<?xml version="1.0" encoding="UTF-8"?>'
-        b'<Relationships '
+        b"<Relationships "
         b'xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         b'<Relationship Id="rId1" '
         b'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
@@ -1084,9 +1049,7 @@ class _DirectIdentifierSanitizer:
         def replace_phone(match: re.Match[str]) -> str:
             digits = re.sub(r"\D", "", match.group(0))
             return (
-                self._token("PHONE", match.group(0))
-                if 8 <= len(digits) <= 15
-                else match.group(0)
+                self._token("PHONE", match.group(0)) if 8 <= len(digits) <= 15 else match.group(0)
             )
 
         sanitized = _PHONE_CANDIDATE_RE.sub(replace_phone, sanitized)
@@ -1111,11 +1074,7 @@ def _safe_template_metadata(
 ) -> ResumeTemplateMetadata:
     """Project parsed layout data onto a compact, identifier-free allowlist."""
 
-    section_order = [
-        value
-        for value in metadata.section_order
-        if value in _SECTION_HEADINGS
-    ][:20]
+    section_order = [value for value in metadata.section_order if value in _SECTION_HEADINGS][:20]
     heading_names: list[str] = []
     for value in metadata.heading_names:
         canonical = _HEADING_ALIASES.get(" ".join(value.upper().split()))
@@ -1131,16 +1090,10 @@ def _safe_template_metadata(
         for value in metadata.font_families
         if value.casefold() in _SAFE_FONT_FAMILIES
     ][:30]
-    colors = [
-        value.upper()
-        for value in metadata.colors
-        if re.fullmatch(r"[A-Fa-f0-9]{6}", value)
-    ][:30]
-    bullet_styles = [
-        value
-        for value in metadata.bullet_styles
-        if value in _SAFE_BULLET_STYLES
-    ][:20]
+    colors = [value.upper() for value in metadata.colors if re.fullmatch(r"[A-Fa-f0-9]{6}", value)][
+        :30
+    ]
+    bullet_styles = [value for value in metadata.bullet_styles if value in _SAFE_BULLET_STYLES][:20]
     heading_spacing = [
         value
         for value in metadata.heading_spacing
@@ -1159,6 +1112,7 @@ def _safe_template_metadata(
     )
 
 
+@traced_stage("pipeline.prepare_gateway_payload")
 def prepare_resume_gateway_payload(
     *,
     profile: CandidateProfile,
@@ -1185,9 +1139,7 @@ def prepare_resume_gateway_payload(
         tailoring_instructions, known_name=known_name
     ).strip()
     sanitized_summary = (
-        sanitizer.sanitize(profile.summary, known_name=known_name)
-        if profile.summary
-        else None
+        sanitizer.sanitize(profile.summary, known_name=known_name) if profile.summary else None
     )
     sanitized_skills = [
         sanitizer.sanitize(value, known_name=known_name) for value in profile.skills
@@ -1236,9 +1188,7 @@ def prepare_resume_gateway_payload(
                 ),
                 capability_tags=fact.capability_tags,
                 metric=(
-                    sanitizer.sanitize(fact.metric, known_name=known_name)
-                    if fact.metric
-                    else None
+                    sanitizer.sanitize(fact.metric, known_name=known_name) if fact.metric else None
                 ),
                 allowed_numbers=fact.allowed_numbers,
                 source_refs=fact.source_refs,
@@ -1268,12 +1218,8 @@ def prepare_resume_gateway_payload(
         output_locale=output_locale,
         job_description=sanitized_job,
         tailoring_instructions=sanitized_instructions,
-        positioning_brief=build_jd_positioning_brief(
-            sanitized_job, sanitized_facts
-        ),
-        composition_evidence_plan=build_composition_evidence_plan(
-            sanitized_job, sanitized_facts
-        ),
+        positioning_brief=build_jd_positioning_brief(sanitized_job, sanitized_facts),
+        composition_evidence_plan=build_composition_evidence_plan(sanitized_job, sanitized_facts),
         candidate_profile=GatewayCandidateProfile(
             summary=sanitized_summary,
             skills=sanitized_skills,
@@ -1325,9 +1271,7 @@ def validate_role_strategy_placeholders(
     returned_tokens = set(_PRIVATE_TOKEN_RE.findall(serialized))
     if returned_tokens - allowed_tokens:
         raise ResumeUploadError("Model output contains an unknown private placeholder")
-    fact_by_id = {
-        item.fact_id: item for item in prepared.payload.candidate_profile.atomic_facts
-    }
+    fact_by_id = {item.fact_id: item for item in prepared.payload.candidate_profile.atomic_facts}
     for rewrite in strategy.bullet_rewrites:
         source_tokens = set(
             _PRIVATE_TOKEN_RE.findall(
@@ -1340,9 +1284,7 @@ def validate_role_strategy_placeholders(
         )
         rewrite_tokens = set(_PRIVATE_TOKEN_RE.findall(rewrite.text))
         if not rewrite_tokens <= source_tokens:
-            raise ResumeUploadError(
-                "Model output did not preserve direct-identifier placeholders"
-            )
+            raise ResumeUploadError("Model output did not preserve direct-identifier placeholders")
     if strategy.summary_rewrite is not None:
         summary_source_tokens = set(
             _PRIVATE_TOKEN_RE.findall(
@@ -1355,9 +1297,7 @@ def validate_role_strategy_placeholders(
         )
         summary_tokens = set(_PRIVATE_TOKEN_RE.findall(strategy.summary_rewrite.text))
         if not summary_tokens <= summary_source_tokens:
-            raise ResumeUploadError(
-                "Model output did not preserve direct-identifier placeholders"
-            )
+            raise ResumeUploadError("Model output did not preserve direct-identifier placeholders")
 
 
 def record_resume_funnel_event(

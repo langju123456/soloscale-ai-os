@@ -244,7 +244,10 @@ class ResumeCloudService:
                 and task.job_description is not None
                 and task.worker_token is not None
             )
-            with self.telemetry.span("worker.execute", {"task.id": task.id}, task.traceparent):
+            with (
+                self.telemetry.span("worker.execute", {"task.id": task.id}, task.traceparent),
+                self.telemetry.activate(),
+            ):
                 if task.mode is TaskMode.TEMPLATE:
                     cache_key = self._cache_key(task, None)
                     if cache_key is not None and self.repository.complete_from_cache(
