@@ -33,8 +33,17 @@ class Telemetry:
         self._trace: Any | None = None
         self._propagate: Any | None = None
         self._closed = False
+        metrics_endpoint = os.environ.get("RESUME_CLOUD_METRICS_OTLP_ENDPOINT", "") or endpoint
+        if metrics_endpoint:
+            metrics_endpoint = (
+                metrics_endpoint[: -len("/v1/traces")] + "/v1/metrics"
+                if metrics_endpoint.rstrip("/").endswith("/v1/traces")
+                else metrics_endpoint.rstrip("/")
+                if metrics_endpoint.rstrip("/").endswith("/v1/metrics")
+                else metrics_endpoint.rstrip("/") + "/v1/metrics"
+            )
         self.metrics = metrics or ResumeCloudMetrics.from_environment(
-            os.environ.get("RESUME_CLOUD_METRICS_EXPORTER", "console").casefold(), endpoint
+            os.environ.get("RESUME_CLOUD_METRICS_EXPORTER", "console").casefold(), metrics_endpoint
         )
         if not enabled:
             return

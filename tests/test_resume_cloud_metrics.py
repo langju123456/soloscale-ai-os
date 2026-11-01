@@ -82,6 +82,8 @@ def test_in_memory_otel_reader_receives_fixed_metric_names() -> None:
     metrics = ResumeCloudMetrics(provider=provider)
     metrics.increment("tasks_created")
     metrics.observe_queue_wait(0.1)
+    with metrics.model_call():
+        provider.force_flush()
     provider.force_flush()
     data = reader.get_metrics_data()
     assert data is not None
@@ -93,4 +95,6 @@ def test_in_memory_otel_reader_receives_fixed_metric_names() -> None:
     assert names == {
         "resume_cloud.tasks_created",
         "resume_cloud.queue_wait_seconds",
+        "resume_cloud.model_active",
+        "resume_cloud.model_peak",
     }

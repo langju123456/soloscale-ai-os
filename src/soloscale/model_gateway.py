@@ -209,7 +209,6 @@ class ModelGateway(Protocol):
     """Minimal structured-output dependency used by product features."""
 
     descriptor: GatewayDescriptor
-    last_call_profile: ModelCallProfile | None
 
     def complete(
         self,

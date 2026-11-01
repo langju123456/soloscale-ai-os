@@ -63,8 +63,11 @@ class ResumeCloudMetrics:
         self._model_peak = 0
         self._otel_counters: dict[str, Any] = {}
         self._otel_histograms: dict[str, Any] = {}
+        self._otel_gauges: list[Any] = []
         self._owned_provider = owned_provider
         if provider is not None:
+            from opentelemetry.metrics import Observation
+
             meter = provider.get_meter("soloscale.resume-cloud")
             self._otel_counters = {
                 name: meter.create_counter(f"resume_cloud.{name}") for name in _COUNTERS
@@ -77,6 +80,16 @@ class ResumeCloudMetrics:
                     "resume_cloud.model_duration_seconds", unit="s"
                 ),
             }
+            self._otel_gauges = [
+                meter.create_observable_gauge(
+                    "resume_cloud.model_active",
+                    callbacks=[lambda _: [Observation(self._gauge_value("model_active"))]],
+                ),
+                meter.create_observable_gauge(
+                    "resume_cloud.model_peak",
+                    callbacks=[lambda _: [Observation(self._gauge_value("model_peak"))]],
+                ),
+            ]
 
     @classmethod
     def from_environment(cls, exporter: str, endpoint: str = "") -> ResumeCloudMetrics:
@@ -148,3 +161,7 @@ class ResumeCloudMetrics:
                 },
                 "gauges": {"model_active": self._model_active, "model_peak": self._model_peak},
             }
+
+    def _gauge_value(self, name: str) -> int:
+        with self._lock:
+            return self._model_active if name == "model_active" else self._model_peak
