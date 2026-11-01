@@ -194,17 +194,6 @@ class ResumeCloudRepository:
             )
             return cur.rowcount == 1
 
-    def defer(self, task_id: str, token: str) -> bool:
-        """Return an unstarted task to the queue when a local model slot is full."""
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """UPDATE resume_cloud_tasks SET state='QUEUED', worker_token=NULL,
-                lease_expires_at=NULL, started_at=NULL, attempt_count=attempt_count-1, updated_at=now()
-                WHERE id=%s AND state='RUNNING' AND worker_token=%s AND lease_expires_at > now()
-                AND model_call_attempted=FALSE""",
-                (task_id, token),
-            )
-            return cur.rowcount == 1
 
     def mark_model_call(self, task_id: str, token: str) -> bool:
         """Persist the possible paid-call boundary before provider invocation."""

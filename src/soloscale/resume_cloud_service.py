@@ -175,15 +175,19 @@ class ResumeCloudService:
         return gateway
 
     def process_one(self, gateway: ModelGateway | None = None) -> CloudTask | None:
-        task = self.repository.claim(self.settings.lease_seconds)
-        if task is None:
+        # A worker process owns this semaphore. Do not claim a task if all pipeline
+        # slots are occupied: it remains QUEUED for a later worker loop.
+        if not self._model_slots.acquire(blocking=False):
             return None
-        assert (
-            task.resume_docx is not None
-            and task.job_description is not None
-            and task.worker_token is not None
-        )
+        task = self.repository.claim(self.settings.lease_seconds)
         try:
+            if task is None:
+                return None
+            assert (
+                task.resume_docx is not None
+                and task.job_description is not None
+                and task.worker_token is not None
+            )
             if task.mode is TaskMode.TEMPLATE:
                 output = tailor_resume_docx(task.resume_docx, task.job_description).content
             else:
@@ -192,27 +196,20 @@ class ResumeCloudService:
                 selected_gateway = gateway or self.configured_gateway()
                 if selected_gateway is None:
                     raise RuntimeError("MODEL_NOT_CONFIGURED")
-                # The worker acquires a process-local slot before claiming work. This
-                # guard remains defensive for direct service callers.
-                if not self._model_slots.acquire(blocking=False):
-                    self.repository.defer(task.id, task.worker_token)
-                    return self.repository.get(task.id)
-                try:
-                    if not self.repository.mark_model_call(task.id, task.worker_token):
+                if not self.repository.mark_model_call(task.id, task.worker_token):
+                    raise RuntimeError("TASK_LEASE_LOST")
+                with _LeaseHeartbeat(self.repository, task, self.settings.lease_seconds) as heartbeat:
+                    output = tailor_resume_docx_with_gateway(
+                        task.resume_docx, task.job_description, gateway=selected_gateway
+                    ).content
+                    if heartbeat.lost.is_set():
                         raise RuntimeError("TASK_LEASE_LOST")
-                    with _LeaseHeartbeat(
-                        self.repository, task, self.settings.lease_seconds
-                    ) as heartbeat:
-                        output = tailor_resume_docx_with_gateway(
-                            task.resume_docx, task.job_description, gateway=selected_gateway
-                        ).content
-                        if heartbeat.lost.is_set():
-                            raise RuntimeError("TASK_LEASE_LOST")
-                finally:
-                    self._model_slots.release()
             self.repository.complete(
                 task.id, task.worker_token, output, self.settings.output_ttl_hours
             )
         except (ResumeTemplateError, RuntimeError):
-            self.repository.fail(task.id, task.worker_token, "PROCESSING_REJECTED")
-        return self.repository.get(task.id)
+            if task is not None:
+                self.repository.fail(task.id, task.worker_token, "PROCESSING_REJECTED")
+        finally:
+            self._model_slots.release()
+        return self.repository.get(task.id) if task is not None else None

@@ -178,14 +178,16 @@ def test_two_worker_threads_claim_one_task_and_expiry_is_immediate() -> None:
     assert service.repository.get(task_id).state.value == "NEEDS_REVIEW"  # type: ignore[union-attr]
 
 
-def test_unstarted_model_slot_deferral_returns_task_to_queue() -> None:
+def test_no_available_worker_slot_leaves_task_queued() -> None:
     client, service = _client()
     headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
     task_id = client.post("/tasks", json=_payload(), headers=headers).json()["id"]
     client.post(f"/tasks/{task_id}/process", headers=headers)
-    claimed = service.repository.claim(300)
-    assert claimed is not None and claimed.worker_token is not None
-    assert service.repository.defer(claimed.id, claimed.worker_token)
+    assert service._model_slots.acquire(blocking=False)
+    try:
+        assert service.process_one() is None
+    finally:
+        service._model_slots.release()
     queued = service.repository.get(task_id)
     assert queued is not None and queued.state.value == "QUEUED" and queued.attempt_count == 0
 
