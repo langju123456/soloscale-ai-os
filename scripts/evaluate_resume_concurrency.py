@@ -532,6 +532,7 @@ def run(args: argparse.Namespace) -> tuple[Path, bool]:
         RESUME_CLOUD_DATABASE_URL=args.dsn,
         RESUME_CLOUD_BEARER_TOKEN=token,
         RESUME_CLOUD_TRACING="false",
+        RESUME_CLOUD_METRICS_EXPORTER="none",
         RESUME_CLOUD_MODEL_PROVIDER="",
         RESUME_CLOUD_MODEL="",
         RESUME_CLOUD_OPENAI_API_KEY="",

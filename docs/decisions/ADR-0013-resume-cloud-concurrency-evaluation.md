@@ -12,6 +12,11 @@ with the configured process-local concurrency. A fake object implementing the ex
 `ModelGateway` protocol is passed only to `process_one`; production provider configuration is
 unchanged.
 
+The opt-in `compose.resume-cloud-eval.yaml` override publishes PostgreSQL only on loopback
+(port 55439 by default). Start only its `postgres` service and create a fresh evaluation
+database with `createdb` inside that container; the README provides the complete commands.
+The production Compose file continues to keep PostgreSQL off the host network.
+
 The fake validates the real structured-output schema, waits for a configured delay, and records
 only ordinal, process ID, monotonic timing, and a safe error category in a private JSONL audit.
 The report derives observed peak calls, task states, request results, and latency samples from
