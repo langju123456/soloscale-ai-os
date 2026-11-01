@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -348,15 +349,22 @@ class ResumeCloudRepository:
             )
             return cur.rowcount == 1
 
-    def recover_and_cleanup(self) -> int:
+    def recover_and_cleanup(
+        self, on_needs_review: Callable[[str, str | None], None] | None = None
+    ) -> int:
         """Never requeue an interrupted model call; it may already have been charged."""
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks
                 WHERE state='RUNNING' AND lease_expires_at < now() ORDER BY lease_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET state='NEEDS_REVIEW', failure_code='LEASE_EXPIRED',
                 resume_docx=NULL, job_description=NULL, updated_at=now() FROM selected
-                WHERE t.id=selected.id AND t.state='RUNNING' AND t.lease_expires_at < now()""")
-            recovered = cur.rowcount
+                WHERE t.id=selected.id AND t.state='RUNNING' AND t.lease_expires_at < now()
+                RETURNING t.id, t.traceparent""")
+            recovered_rows = cur.fetchall()
+            recovered = len(recovered_rows)
+            if on_needs_review is not None:
+                for row in recovered_rows:
+                    on_needs_review(str(row["id"]), row.get("traceparent"))
             cur.execute("""WITH selected AS (SELECT id FROM resume_cloud_tasks WHERE state IN ('PREPARED','QUEUED')
                 AND input_expires_at < now() ORDER BY input_expires_at LIMIT 100)
                 UPDATE resume_cloud_tasks t SET state='FAILED', failure_code='INPUT_EXPIRED', resume_docx=NULL,

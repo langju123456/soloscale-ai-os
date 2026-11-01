@@ -5,6 +5,8 @@ from __future__ import annotations
 import hmac
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
@@ -37,6 +39,13 @@ def _error(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code})
 
 
+def _span_error(span: object | None, category: str) -> None:
+    if span is not None:
+        # Categories deliberately omit headers, payloads, and exception messages.
+        span.set_attribute("outcome", "rejected")  # type: ignore[attr-defined]
+        span.set_attribute("error.category", category)  # type: ignore[attr-defined]
+
+
 def create_app(
     settings: CloudSettings | None = None, telemetry: Telemetry | None = None
 ) -> FastAPI:
@@ -44,7 +53,15 @@ def create_app(
     repository = ResumeCloudRepository(selected.database_url)
     selected_telemetry = telemetry or Telemetry.from_environment()
     service = ResumeCloudService(repository, selected, telemetry=selected_telemetry)
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            selected_telemetry.shutdown()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(BodyLimitMiddleware)
 
     @app.exception_handler(RequestValidationError)
@@ -90,25 +107,37 @@ def create_app(
         if not _CLIENT_ID.fullmatch(partition):
             raise _error(400, "INVALID_CLIENT_ID")
         try:
-            with selected_telemetry.span("api.tasks.create", parent=incoming_traceparent):
-                task, _ = service.create(
-                    payload, idempotency_key.strip(), partition, selected_telemetry.traceparent()
-                )
-        except RateLimitExceeded as exc:
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "RATE_LIMITED"},
-                headers={"Retry-After": str(max(1, int(exc.retry_after + 0.999)))},
-            ) from exc
-        except ValueError as exc:
-            if str(exc) == "IDEMPOTENCY_CONFLICT":
-                raise _error(409, "IDEMPOTENCY_CONFLICT") from exc
-            raise _error(503, "SERVICE_UNAVAILABLE") from exc
+            with selected_telemetry.span("api.tasks.create", parent=incoming_traceparent) as span:
+                try:
+                    task, replayed = service.create(
+                        payload,
+                        idempotency_key.strip(),
+                        partition,
+                        selected_telemetry.traceparent(),
+                    )
+                except RateLimitExceeded as exc:
+                    _span_error(span, "rate_limited")
+                    raise HTTPException(
+                        status_code=429,
+                        detail={"code": "RATE_LIMITED"},
+                        headers={"Retry-After": str(max(1, int(exc.retry_after + 0.999)))},
+                    ) from exc
+                except ValueError as exc:
+                    if str(exc) == "IDEMPOTENCY_CONFLICT":
+                        _span_error(span, "idempotency_conflict")
+                        raise _error(409, "IDEMPOTENCY_CONFLICT") from exc
+                    _span_error(span, "persistence")
+                    raise _error(503, "SERVICE_UNAVAILABLE") from exc
+                except Exception as exc:
+                    _span_error(span, "invalid_resume")
+                    logging.getLogger(__name__).info(
+                        "resume create rejected type=%s", type(exc).__name__
+                    )
+                    raise _error(422, "INVALID_RESUME") from exc
+                if span is not None:
+                    span.set_attribute("outcome", "replayed" if replayed else "created")
         except HTTPException:
             raise
-        except Exception as exc:
-            logging.getLogger(__name__).info("resume create rejected type=%s", type(exc).__name__)
-            raise _error(422, "INVALID_RESUME") from exc
         return _view(task)
 
     @app.get("/tasks/{task_id}", dependencies=[Depends(authorize)])

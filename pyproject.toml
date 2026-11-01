@@ -153,3 +153,7 @@ packages = ["soloscale"]
 [[tool.mypy.overrides]]
 module = ["buildlog", "buildlog.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["opentelemetry", "opentelemetry.*"]
+ignore_missing_imports = true

@@ -26,6 +26,7 @@ from soloscale.model_gateway import (
 )
 from soloscale.resume_cloud_api import create_app
 from soloscale.resume_cloud_models import TaskMode
+from soloscale.resume_cloud_observability import Telemetry
 from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
 from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService, prepare_cloud_input
 
@@ -106,6 +107,48 @@ def test_create_idempotency_worker_and_download() -> None:
     assert output.headers["x-soloscale-output-sha256"]
 
 
+def test_traces_continue_from_create_to_claim_pipeline_and_terminal() -> None:
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    telemetry = Telemetry(enabled=True, provider=provider)
+    assert DATABASE_URL is not None
+    settings = CloudSettings(database_url=DATABASE_URL, bearer_token="t" * 32)
+    service = ResumeCloudService(ResumeCloudRepository(DATABASE_URL), settings, telemetry=telemetry)
+    headers = {"Authorization": "Bearer " + "t" * 32, "Idempotency-Key": str(uuid.uuid4())}
+    with TestClient(create_app(settings, telemetry=telemetry)) as client:
+        created = client.post("/tasks", json=_payload(), headers=headers)
+        assert created.status_code == 201
+        assert client.post("/tasks", json=_payload(), headers=headers).status_code == 201
+        changed = _payload()
+        changed["job_description"] = "different"
+        assert client.post("/tasks", json=changed, headers=headers).status_code == 409
+        process = client.post(f"/tasks/{created.json()['id']}/process", headers=headers)
+        assert process.status_code == 200
+        assert service.process_one() is not None
+    finished = exporter.get_finished_spans()
+    spans = {span.name: span for span in finished if span.name != "api.tasks.create"}
+    api = next(
+        span
+        for span in finished
+        if span.name == "api.tasks.create" and span.attributes["outcome"] == "created"
+    )
+    claim = spans["worker.claim"]
+    execute = spans["worker.execute"]
+    terminal = spans["worker.terminal"]
+    assert api.attributes["outcome"] == "created"
+    assert claim.context.trace_id == api.context.trace_id == execute.context.trace_id
+    assert claim.parent is not None and claim.parent.span_id == api.context.span_id
+    assert execute.parent is not None and execute.parent.span_id == claim.context.span_id
+    assert terminal.parent is not None and terminal.parent.span_id == execute.context.span_id
+    assert terminal.attributes["terminal.state"] == "SUCCEEDED"
+
+
 def test_result_cache_reuses_same_client_without_extending_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -172,6 +215,37 @@ def test_result_cache_does_not_cross_client_or_survive_cleanup(
     with service.repository._connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS count FROM resume_cloud_result_cache")
         assert cur.fetchone() == {"count": 1}
+
+
+def test_expired_cache_regenerates_once_then_third_task_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, service = _client()
+    headers = {"Authorization": "Bearer " + "t" * 32, "X-Client-ID": "alpha"}
+    calls = 0
+
+    def tailor(*_: object) -> object:
+        nonlocal calls
+        calls += 1
+        return type("Result", (), {"content": b"cached-docx"})()
+
+    monkeypatch.setattr("soloscale.resume_cloud_service.tailor_resume_docx", tailor)
+
+    def process() -> None:
+        task_id = client.post(
+            "/tasks", json=_payload(), headers={**headers, "Idempotency-Key": str(uuid.uuid4())}
+        ).json()["id"]
+        assert client.post(f"/tasks/{task_id}/process", headers=headers).status_code == 200
+        assert service.process_one() is not None
+
+    process()
+    with service.repository._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE resume_cloud_result_cache SET output_expires_at=now() - interval '1 second'"
+        )
+    process()
+    process()
+    assert calls == 2
 
 
 def test_cross_client_idempotency_replay_is_conflict() -> None:

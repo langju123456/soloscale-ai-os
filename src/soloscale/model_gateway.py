@@ -209,6 +209,7 @@ class ModelGateway(Protocol):
     """Minimal structured-output dependency used by product features."""
 
     descriptor: GatewayDescriptor
+    last_call_profile: ModelCallProfile | None
 
     def complete(
         self,
@@ -1378,6 +1379,7 @@ class UnconfiguredModelGateway:
         if descriptor.configuration_state is not GatewayConfigurationState.NOT_CONFIGURED:
             raise ValueError("unconfigured gateway requires a not-configured descriptor")
         self.descriptor = descriptor
+        self.last_call_profile: ModelCallProfile | None = None
 
     def complete(
         self,
