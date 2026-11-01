@@ -114,27 +114,26 @@ class ResumeCloudRepository:
         """Atomically spend one client token; API instances share this PostgreSQL row."""
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO resume_cloud_rate_limits AS limits
-                    (client_id, tokens, updated_at, last_allowed)
-                VALUES (%s, %s - 1, %s, TRUE)
-                ON CONFLICT (client_id) DO UPDATE SET
-                  tokens = GREATEST(0, LEAST(%s::double precision,
-                    limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) -
-                    CASE WHEN LEAST(%s::double precision,
-                      limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) >= 1
-                      THEN 1 ELSE 0 END),
-                  updated_at = %s,
-                  last_allowed = LEAST(%s::double precision,
-                    limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) >= 1
-                RETURNING last_allowed""",
-                (
-                    client_id, capacity, now, capacity, now, refill_per_second,
-                    capacity, now, refill_per_second, now, capacity, now, refill_per_second,
-                ),
+                """INSERT INTO resume_cloud_rate_limits (client_id, tokens, updated_at, last_allowed)
+                VALUES (%s, %s, %s, FALSE) ON CONFLICT (client_id) DO NOTHING""",
+                (client_id, capacity, now),
+            )
+            cur.execute(
+                """WITH available AS (
+                    SELECT LEAST(%s::double precision, tokens + GREATEST(0, EXTRACT(EPOCH FROM
+                    (%s::timestamptz - updated_at))) * %s) AS tokens FROM resume_cloud_rate_limits
+                    WHERE client_id=%s FOR UPDATE)
+                UPDATE resume_cloud_rate_limits AS limits SET
+                  tokens = GREATEST(0, available.tokens - CASE WHEN available.tokens >= 1 THEN 1 ELSE 0 END),
+                  updated_at = GREATEST(limits.updated_at, %s::timestamptz),
+                  last_allowed = available.tokens >= 1
+                FROM available WHERE limits.client_id=%s
+                RETURNING last_allowed, tokens""",
+                (capacity, now, refill_per_second, client_id, now, client_id),
             )
             row = cur.fetchone()
             assert row is not None
-            return bool(row["last_allowed"]), 1.0 / refill_per_second
+            return bool(row["last_allowed"]), max(0.0, (1.0 - float(row["tokens"])) / refill_per_second)
 
     def get(self, task_id: str) -> CloudTask | None:
         with self._connect() as conn, conn.cursor() as cur:

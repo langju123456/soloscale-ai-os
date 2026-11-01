@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -38,6 +39,10 @@ class CloudSettings:
     rate_limit_refill_per_second: float = 1.0
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
+    def __post_init__(self) -> None:
+        if self.rate_limit_capacity < 1 or not math.isfinite(self.rate_limit_refill_per_second) or self.rate_limit_refill_per_second <= 0:
+            raise ValueError("rate limit settings must be finite and positive")
+
     @classmethod
     def from_environment(cls, *, require_bearer: bool = True) -> CloudSettings:
         database_url = os.environ.get("RESUME_CLOUD_DATABASE_URL", "")
@@ -50,8 +55,8 @@ class CloudSettings:
             raise RuntimeError("RESUME_CLOUD_DATABASE_URL and a 32+ byte bearer token are required")
         capacity = int(os.environ.get("RESUME_CLOUD_RATE_LIMIT_CAPACITY", "20"))
         refill = float(os.environ.get("RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND", "1"))
-        if capacity < 1 or refill <= 0:
-            raise RuntimeError("Resume cloud rate limit settings must be positive")
+        if capacity < 1 or not math.isfinite(refill) or refill <= 0:
+            raise RuntimeError("Resume cloud rate limit settings must be finite and positive")
         return cls(
             database_url=database_url,
             bearer_token=bearer_token,

@@ -141,6 +141,8 @@ def test_client_rate_limit_shared_default_and_clock_recovery() -> None:
     assert submit(str(uuid.uuid4())) == 429
     now += timedelta(seconds=1)
     assert submit(str(uuid.uuid4()), "alpha") == 201
+    now -= timedelta(seconds=10)
+    assert submit(str(uuid.uuid4()), "alpha") == 429
     invalid = client.post(
         "/tasks",
         json=_payload(),

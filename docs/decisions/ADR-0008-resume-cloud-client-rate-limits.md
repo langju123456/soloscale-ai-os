@@ -13,7 +13,9 @@ one shared bearer token and no tenant identity.
 `POST /tasks` uses a PostgreSQL-backed token bucket keyed by `X-Client-ID`. A missing
 header uses the `default` partition, so omission cannot bypass the limit. The capacity and
 refill rate are environment-configurable. A single `INSERT ... ON CONFLICT DO UPDATE ...
-RETURNING` spends/refills each bucket, so API processes share the same state. Invalid labels
+RETURNING` spends/refills each existing bucket; an idempotent insert initializes a missing
+row first, so API processes share the same state. The update clamps backwards clocks and
+never moves the stored timestamp backward. Invalid labels
 return 400; rejected requests return 429 with `Retry-After`.
 
 The label is a partition key only, not authentication. In this trusted-caller deployment,
