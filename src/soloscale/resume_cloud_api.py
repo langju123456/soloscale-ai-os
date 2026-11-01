@@ -61,7 +61,21 @@ def create_app(
         finally:
             selected_telemetry.shutdown()
 
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    # Keep framework auto-instrumentation from exporting request/exception content.
+    # Older FastAPI versions accept this through their extra kwargs.
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+        telemetry={
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        },
+    )
     app.add_middleware(BodyLimitMiddleware)
 
     @app.exception_handler(RequestValidationError)

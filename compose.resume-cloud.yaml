@@ -31,6 +31,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.resume-cloud
+      args: {RESUME_CLOUD_EXTRAS: "${RESUME_CLOUD_EXTRAS:-cloud,observability}"}
     environment:
       RESUME_CLOUD_DATABASE_URL: postgresql://resume_cloud@postgres/resume_cloud
       RESUME_CLOUD_BEARER_TOKEN_FILE: /run/secrets/api_bearer_token
