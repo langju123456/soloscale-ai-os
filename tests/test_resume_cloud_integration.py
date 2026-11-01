@@ -9,6 +9,7 @@ import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -29,7 +30,7 @@ pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="requires CLOUD_TEST_DA
 def clean_tasks() -> None:
     assert DATABASE_URL is not None
     with ResumeCloudRepository(DATABASE_URL)._connect() as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE resume_cloud_tasks")
+        cur.execute("TRUNCATE resume_cloud_tasks, resume_cloud_rate_limits")
 
 
 def _payload() -> dict[str, object]:
@@ -110,6 +111,42 @@ def test_same_key_concurrent_create_is_one_task() -> None:
     with ThreadPoolExecutor(max_workers=2) as pool:
         ids = list(pool.map(lambda _: create(), range(2)))
     assert ids[0] == ids[1]
+
+
+def test_client_rate_limit_shared_default_and_clock_recovery() -> None:
+    assert DATABASE_URL is not None
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    settings = CloudSettings(
+        database_url=DATABASE_URL,
+        bearer_token="t" * 32,
+        rate_limit_capacity=2,
+        rate_limit_refill_per_second=1.0,
+        clock=lambda: now,
+    )
+    client = TestClient(create_app(settings))
+    headers = {"Authorization": "Bearer " + "t" * 32}
+
+    def submit(key: str, client_id: str | None = None) -> int:
+        supplied = {**headers, "Idempotency-Key": key}
+        if client_id is not None:
+            supplied["X-Client-ID"] = client_id
+        return int(client.post("/tasks", json=_payload(), headers=supplied).status_code)
+
+    assert submit(str(uuid.uuid4()), "alpha") == 201
+    assert submit(str(uuid.uuid4()), "alpha") == 201
+    assert submit(str(uuid.uuid4()), "alpha") == 429
+    assert submit(str(uuid.uuid4()), "beta") == 201
+    assert submit(str(uuid.uuid4())) == 201
+    assert submit(str(uuid.uuid4())) == 201
+    assert submit(str(uuid.uuid4())) == 429
+    now += timedelta(seconds=1)
+    assert submit(str(uuid.uuid4()), "alpha") == 201
+    invalid = client.post(
+        "/tasks",
+        json=_payload(),
+        headers={**headers, "Idempotency-Key": str(uuid.uuid4()), "X-Client-ID": "bad label"},
+    )
+    assert invalid.status_code == 400
 
 
 def test_two_worker_threads_claim_one_task_and_expiry_is_immediate() -> None:

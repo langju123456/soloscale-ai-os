@@ -103,6 +103,39 @@ class ResumeCloudRepository:
                 raise ValueError("IDEMPOTENCY_CONFLICT")
             return self._task(existing), True
 
+    def consume_rate_limit(
+        self,
+        client_id: str,
+        *,
+        capacity: int,
+        refill_per_second: float,
+        now: datetime,
+    ) -> tuple[bool, float]:
+        """Atomically spend one client token; API instances share this PostgreSQL row."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO resume_cloud_rate_limits AS limits
+                    (client_id, tokens, updated_at, last_allowed)
+                VALUES (%s, %s - 1, %s, TRUE)
+                ON CONFLICT (client_id) DO UPDATE SET
+                  tokens = GREATEST(0, LEAST(%s::double precision,
+                    limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) -
+                    CASE WHEN LEAST(%s::double precision,
+                      limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) >= 1
+                      THEN 1 ELSE 0 END),
+                  updated_at = %s,
+                  last_allowed = LEAST(%s::double precision,
+                    limits.tokens + EXTRACT(EPOCH FROM (%s::timestamptz - limits.updated_at)) * %s) >= 1
+                RETURNING last_allowed""",
+                (
+                    client_id, capacity, now, capacity, now, refill_per_second,
+                    capacity, now, refill_per_second, now, capacity, now, refill_per_second,
+                ),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            return bool(row["last_allowed"]), 1.0 / refill_per_second
+
     def get(self, task_id: str) -> CloudTask | None:
         with self._connect() as conn, conn.cursor() as cur:
             self._expire_one(cur, task_id)

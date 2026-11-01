@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from soloscale.model_gateway import (
     GatewayConfigurationState,
@@ -32,6 +34,9 @@ class CloudSettings:
     input_ttl_hours: int = 24
     output_ttl_hours: int = 24
     lease_seconds: int = 300
+    rate_limit_capacity: int = 20
+    rate_limit_refill_per_second: float = 1.0
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     @classmethod
     def from_environment(cls, *, require_bearer: bool = True) -> CloudSettings:
@@ -43,7 +48,16 @@ class CloudSettings:
                 bearer_token = handle.read().strip()
         if not database_url or (require_bearer and len(bearer_token) < 32):
             raise RuntimeError("RESUME_CLOUD_DATABASE_URL and a 32+ byte bearer token are required")
-        return cls(database_url=database_url, bearer_token=bearer_token)
+        capacity = int(os.environ.get("RESUME_CLOUD_RATE_LIMIT_CAPACITY", "20"))
+        refill = float(os.environ.get("RESUME_CLOUD_RATE_LIMIT_REFILL_PER_SECOND", "1"))
+        if capacity < 1 or refill <= 0:
+            raise RuntimeError("Resume cloud rate limit settings must be positive")
+        return cls(
+            database_url=database_url,
+            bearer_token=bearer_token,
+            rate_limit_capacity=capacity,
+            rate_limit_refill_per_second=refill,
+        )
 
 
 class _LeaseHeartbeat:
@@ -112,6 +126,14 @@ class ResumeCloudService:
             mode=payload.mode,
             approved=payload.approve_external_model_call,
             input_ttl_hours=self.settings.input_ttl_hours,
+        )
+
+    def consume_client_rate_limit(self, client_id: str) -> tuple[bool, float]:
+        return self.repository.consume_rate_limit(
+            client_id,
+            capacity=self.settings.rate_limit_capacity,
+            refill_per_second=self.settings.rate_limit_refill_per_second,
+            now=self.settings.clock(),
         )
 
     @staticmethod
