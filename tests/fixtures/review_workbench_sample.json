@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "name": "SoloScale Review Workbench sample run",
+  "provenance": "SAMPLE FIXTURE. Synthetic text written for the Review Workbench demo and tests. It paraphrases public repository documents (docs/engineering/2026-09-29-local-resume-api.md, docs/engineering/resume-cloud-runbook.md, docs/decisions/ADR-0004-private-conversation-rag.md). It is not a real user conversation, and the draft below was scripted, not produced by an LLM.",
+  "question": "[SAMPLE FIXTURE] How do the SoloScale Resume API and Resume Cloud worker protect requests and paid model calls?",
+  "reasoner_model": "fixture/scripted-reasoner-no-llm",
+  "documents": [
+    {
+      "id": "sample-doc-resume-api",
+      "external_id": "sample-resume-api-body-limit",
+      "locator": "sample://fixture/resume-api-body-limit",
+      "source_kind": "buildlog_run",
+      "title": "Sample: Resume API body limit",
+      "chunks": [
+        {"id": "sample-resume-api-c0", "role": "user", "text": "Why did oversized Resume API requests come back as HTTP 400 instead of 413?"},
+        {"id": "sample-resume-api-c1", "role": "assistant", "text": "A receive-time body-limit exception surfaced as a FastAPI 400. The repair is a bounded ASGI pre-reader that counts each streamed request chunk and returns 413 before FastAPI buffers or parses JSON. It does not trust the Content-Length header."},
+        {"id": "sample-resume-api-c2", "role": "artifact", "text": "Verification: the API test suite passed, and a request over the complete body budget returned 413 with a stable error envelope and no input body in the response."}
+      ]
+    },
+    {
+      "id": "sample-doc-resume-cloud",
+      "external_id": "sample-resume-cloud-lease",
+      "locator": "sample://fixture/resume-cloud-lease",
+      "source_kind": "buildlog_run",
+      "title": "Sample: Resume Cloud lease recovery",
+      "chunks": [
+        {"id": "sample-resume-cloud-c0", "role": "assistant", "text": "A lease-expired RUNNING task becomes NEEDS_REVIEW and is never requeued, because a paid provider may already have received the model call."},
+        {"id": "sample-resume-cloud-c1", "role": "artifact", "text": "The worker claims queued tasks with FOR UPDATE SKIP LOCKED and permits exactly one attempt per task."}
+      ]
+    },
+    {
+      "id": "sample-doc-citations",
+      "external_id": "sample-evidence-agent-citations",
+      "locator": "sample://fixture/evidence-agent-citations",
+      "source_kind": "codex_session",
+      "title": "Sample: Evidence Agent citation boundary",
+      "chunks": [
+        {"id": "sample-citations-c0", "role": "assistant", "text": "Every declared claim must cite an in-context chunk retrieved in the same Evidence Agent run."},
+        {"id": "sample-citations-c1", "role": "assistant", "text": "Cited chunk hashes are rechecked against the current knowledge index before a candidate result is accepted."}
+      ]
+    },
+    {
+      "id": "sample-doc-local-ui",
+      "external_id": "sample-local-ui-binding",
+      "locator": "sample://fixture/local-ui-binding",
+      "source_kind": "codex_session",
+      "title": "Sample: local UI binding note",
+      "chunks": [
+        {"id": "sample-local-ui-c0", "role": "assistant", "text": "The local operator UI binds only to the loopback address 127.0.0.1 on port 8765."}
+      ]
+    }
+  ],
+  "reasoner_responses": [
+    {"queries": ["body limit 413 Content-Length", "lease NEEDS_REVIEW requeued paid provider", "claim cite in-context chunk", "operator UI loopback port"]},
+    {"finish": true, "additional_queries": [], "limitations": []},
+    {
+      "claims": [
+        {"text": "The Resume API rejects an oversized request with 413 by counting streamed chunks before JSON parsing, without trusting Content-Length.", "evidence_chunk_ids": ["sample-resume-api-c1"]},
+        {"text": "The body-limit repair was verified: an over-budget request returned 413 with a stable error envelope.", "evidence_chunk_ids": ["sample-resume-api-c2"]},
+        {"text": "Resume Cloud never requeues a lease-expired task, because the paid provider may already have been called.", "evidence_chunk_ids": ["sample-resume-cloud-c0"]},
+        {"text": "The Evidence Agent accepts a claim only when it cites an in-context chunk from the same run.", "evidence_chunk_ids": ["sample-citations-c0"]},
+        {"text": "The local operator UI listens only on 127.0.0.1:8765.", "evidence_chunk_ids": ["sample-local-ui-c0"]}
+      ],
+      "unsupported": ["The sample sources do not state how long Resume Cloud keeps generated output files."],
+      "open_questions": ["Whether an operator may requeue a lease-expired task manually is not established by the sample sources."],
+      "suggested_case_title": "Sample: request and paid-call safeguards",
+      "suggested_outputs": ["interview case"]
+    }
+  ],
+  "post_draft_source_edits": {
+    "description": "Applied to the knowledge index after the draft is written, to reproduce sources changing between drafting and human review.",
+    "documents": [
+      {
+        "id": "sample-doc-resume-cloud",
+        "reason": "Cited chunk text changed after drafting -> HASH_MISMATCH",
+        "chunks": [
+          {"id": "sample-resume-cloud-c0", "role": "assistant", "text": "A lease-expired RUNNING task becomes NEEDS_REVIEW. It is not requeued automatically; an operator may requeue it only after confirming that no provider call was billed."},
+          {"id": "sample-resume-cloud-c1", "role": "artifact", "text": "The worker claims queued tasks with FOR UPDATE SKIP LOCKED and permits exactly one attempt per task."}
+        ]
+      },
+      {
+        "id": "sample-doc-citations",
+        "reason": "A sibling chunk changed; the cited chunk is identical -> DOCUMENT_REVISED",
+        "chunks": [
+          {"id": "sample-citations-c0", "role": "assistant", "text": "Every declared claim must cite an in-context chunk retrieved in the same Evidence Agent run."},
+          {"id": "sample-citations-c1", "role": "assistant", "text": "Cited chunk hashes are rechecked against the current knowledge index before a candidate result is accepted. Citation membership is structural only; semantic support still needs human review."}
+        ]
+      },
+      {
+        "id": "sample-doc-local-ui",
+        "reason": "Cited chunk no longer exists in the index -> SOURCE_MISSING",
+        "chunks": [
+          {"id": "sample-local-ui-c0-rewritten", "role": "assistant", "text": "The local operator UI port is configurable; the default loopback port is 8765."}
+        ]
+      }
+    ]
+  },
+  "expected_evidence_status": {
+    "0": "FULLY_VERIFIED",
+    "1": "FULLY_VERIFIED",
+    "2": "HASH_MISMATCH",
+    "3": "PARTIALLY_VERIFIED",
+    "4": "UNVERIFIED"
+  }
+}

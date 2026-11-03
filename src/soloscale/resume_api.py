@@ -90,8 +90,9 @@ class PreviewResponse(_RequestModel):
 class BodyLimitMiddleware:
     """Reject an oversized ASGI body before FastAPI buffers or parses JSON."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, limit: int = API_BODY_LIMIT) -> None:
         self.app = app
+        self.limit = limit
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -105,7 +106,7 @@ class BodyLimitMiddleware:
             body = message.get("body", b"")
             if isinstance(body, bytes):
                 received += len(body)
-                if received > API_BODY_LIMIT:
+                if received > self.limit:
                     response = JSONResponse(
                         status_code=413,
                         content={

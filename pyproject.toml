@@ -55,7 +55,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-soloscale = ["content_data/*.json"]
+soloscale = ["content_data/*.json", "review_migrations/*.sql"]
 
 [tool.setuptools.data-files]
 "share/soloscale-ai-os/.agents" = [".agents/README.md"]
