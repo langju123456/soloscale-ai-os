@@ -109,6 +109,16 @@ Private Codex/ChatGPT and BuildLog history are excluded by default. The existing
 generator and recovering from provider length/schema failures are separate follow-up
 work, not completed capabilities in this revision.
 
+### Review Workbench
+
+Evidence Agent claims can be reviewed one by one in a local workbench: each claim shows
+the exact excerpt the model cited and whether that passage still matches the knowledge
+index. The FastAPI service enforces the state machine (claims that are not fully verified
+need a reviewer note, and a changed source cannot be confirmed), keeps the model's
+original text as version 1, appends corrections and a review log, and rejects stale edits.
+A Next.js UI lives in `web/review-workbench/`. See the
+[Review Workbench walkthrough](docs/review-workbench.md).
+
 ### Engineering Learning
 
 Resolved engineering work can become structured interview practice through:
@@ -237,6 +247,14 @@ For the containerized API and worker with durable PostgreSQL tasks, use the
 infrastructure, scoped deployment access, and cleanup commands. Local container
 checks have passed; a live AWS deployment has not yet been verified.
 
+For the Review Workbench API and UI (loopback only, zero model calls):
+
+```bash
+python -m soloscale.review_sample --data-root .soloscale/review-demo  # labelled sample run
+python -m soloscale.review_api --data-root .soloscale/review-demo     # 127.0.0.1:8767
+cd web/review-workbench && npm ci && npm run build && npm start       # 127.0.0.1:3000
+```
+
 The local UI opens at:
 
 ```text
@@ -287,6 +305,7 @@ src/soloscale/      Core product domains and adapters
 tests/              Deterministic test suite
 desktop/macos/      Native macOS desktop application
 video_factory/      Remotion / TypeScript video renderer
+web/review-workbench/  Next.js Review Workbench UI for Evidence Agent claims
 media_runtime/      Optional local MLX worker
 packaging/macos/    Desktop backend packaging
 .agents/skills/     Versioned bounded agent Skills

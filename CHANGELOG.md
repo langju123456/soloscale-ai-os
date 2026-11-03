@@ -2,6 +2,28 @@
 
 All notable changes will be documented here.
 
+## [Unreleased]
+
+### Added
+
+- Review Workbench: one review item per Evidence Agent claim, with the cited excerpt the
+  model saw and a per-citation check against the current knowledge index. Evidence status
+  is a documented rule (`FULLY_VERIFIED`, `PARTIALLY_VERIFIED`, `UNVERIFIED`,
+  `HASH_MISMATCH`), not a confidence score; anything not fully verified starts in
+  `NEEDS_REVIEW`.
+- Server-enforced review state machine with required notes, a confirm block on changed
+  sources, all-or-nothing batch confirmation of fully verified items, append-only text
+  versions and review log, version diffs, and `expected_revision` checks that reject
+  stale edits. SQLite schema v1 enforces the history invariants with triggers.
+- Loopback `soloscale.review_api` (FastAPI) and a Next.js UI in `web/review-workbench/`.
+- `soloscale.review_sample` builds a labelled sample run through the real KnowledgeStore
+  and Evidence Agent loop with a scripted reasoner.
+- ADR-0008 and the [Review Workbench walkthrough](docs/review-workbench.md).
+
+### Changed
+
+- `BodyLimitMiddleware` accepts an optional `limit`; the Resume API default is unchanged.
+
 ## [0.4.2] — 2026-10-02
 
 ### Fixed
