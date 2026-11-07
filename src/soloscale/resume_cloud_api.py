@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hmac
 import logging
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
@@ -13,8 +16,12 @@ from fastapi.responses import JSONResponse
 
 from soloscale.resume_api import BodyLimitMiddleware
 from soloscale.resume_cloud_models import MAX_IDEMPOTENCY_KEY_CHARS, CreateTaskRequest, TaskView
-from soloscale.resume_cloud_repository import CloudTask, ResumeCloudRepository
+from soloscale.resume_cloud_observability import Telemetry
+from soloscale.resume_cloud_repository import CloudTask, RateLimitExceeded, ResumeCloudRepository
 from soloscale.resume_cloud_service import CloudSettings, ResumeCloudService
+
+_CLIENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_DEFAULT_CLIENT_ID = "default"
 
 
 def _view(task: CloudTask) -> TaskView:
@@ -32,11 +39,43 @@ def _error(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code})
 
 
-def create_app(settings: CloudSettings | None = None) -> FastAPI:
+def _span_error(span: object | None, category: str) -> None:
+    if span is not None:
+        # Categories deliberately omit headers, payloads, and exception messages.
+        span.set_attribute("outcome", "rejected")  # type: ignore[attr-defined]
+        span.set_attribute("error.category", category)  # type: ignore[attr-defined]
+
+
+def create_app(
+    settings: CloudSettings | None = None, telemetry: Telemetry | None = None
+) -> FastAPI:
     selected = settings or CloudSettings.from_environment()
     repository = ResumeCloudRepository(selected.database_url)
-    service = ResumeCloudService(repository, selected)
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    selected_telemetry = telemetry or Telemetry.from_environment()
+    service = ResumeCloudService(repository, selected, telemetry=selected_telemetry)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            selected_telemetry.shutdown()
+
+    # Keep framework auto-instrumentation from exporting request/exception content.
+    # Older FastAPI versions accept this through their extra kwargs.
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+        telemetry={
+            "tracing": False,
+            "metrics": False,
+            "logs": False,
+            "operation_spans": False,
+            "auto_configure": False,
+        },
+    )
     app.add_middleware(BodyLimitMiddleware)
 
     @app.exception_handler(RequestValidationError)
@@ -65,10 +104,16 @@ def create_app(settings: CloudSettings | None = None) -> FastAPI:
             raise _error(503, "NOT_READY")
         return {"ready": True}
 
+    @app.get("/metrics", dependencies=[Depends(authorize)])
+    def metrics() -> dict[str, object]:
+        return selected_telemetry.metrics.snapshot()
+
     @app.post("/tasks", status_code=201, dependencies=[Depends(authorize)])
     def create_task(
         payload: CreateTaskRequest,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+        client_id: Annotated[str | None, Header(alias="X-Client-ID")] = None,
+        incoming_traceparent: Annotated[str | None, Header(alias="traceparent")] = None,
     ) -> TaskView:
         if (
             idempotency_key is None
@@ -76,17 +121,46 @@ def create_app(settings: CloudSettings | None = None) -> FastAPI:
             or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_CHARS
         ):
             raise _error(400, "IDEMPOTENCY_KEY_REQUIRED")
+        partition = _DEFAULT_CLIENT_ID if client_id is None else client_id.strip()
+        if not _CLIENT_ID.fullmatch(partition):
+            raise _error(400, "INVALID_CLIENT_ID")
         try:
-            task, _ = service.create(payload, idempotency_key.strip())
-        except ValueError as exc:
-            if str(exc) == "IDEMPOTENCY_CONFLICT":
-                raise _error(409, "IDEMPOTENCY_CONFLICT") from exc
-            raise _error(503, "SERVICE_UNAVAILABLE") from exc
+            with selected_telemetry.span("api.tasks.create", parent=incoming_traceparent) as span:
+                try:
+                    task, replayed = service.create(
+                        payload,
+                        idempotency_key.strip(),
+                        partition,
+                        selected_telemetry.traceparent(),
+                    )
+                except RateLimitExceeded as exc:
+                    selected_telemetry.metrics.increment("task_create_rate_limited")
+                    _span_error(span, "rate_limited")
+                    raise HTTPException(
+                        status_code=429,
+                        detail={"code": "RATE_LIMITED"},
+                        headers={"Retry-After": str(max(1, int(exc.retry_after + 0.999)))},
+                    ) from exc
+                except ValueError as exc:
+                    if str(exc) == "IDEMPOTENCY_CONFLICT":
+                        selected_telemetry.metrics.increment("idempotency_conflicts")
+                        _span_error(span, "idempotency_conflict")
+                        raise _error(409, "IDEMPOTENCY_CONFLICT") from exc
+                    _span_error(span, "persistence")
+                    raise _error(503, "SERVICE_UNAVAILABLE") from exc
+                except Exception as exc:
+                    _span_error(span, "invalid_resume")
+                    logging.getLogger(__name__).info(
+                        "resume create rejected type=%s", type(exc).__name__
+                    )
+                    raise _error(422, "INVALID_RESUME") from exc
+                if span is not None:
+                    span.set_attribute("outcome", "replayed" if replayed else "created")
+                selected_telemetry.metrics.increment(
+                    "tasks_replayed" if replayed else "tasks_created"
+                )
         except HTTPException:
             raise
-        except Exception as exc:
-            logging.getLogger(__name__).info("resume create rejected type=%s", type(exc).__name__)
-            raise _error(422, "INVALID_RESUME") from exc
         return _view(task)
 
     @app.get("/tasks/{task_id}", dependencies=[Depends(authorize)])

@@ -1,0 +1,342 @@
+[
+  {
+    "attempt_count": 1,
+    "id": "3ec217eb-6c89-4aff-882c-a08ec499e742",
+    "latency": 0.910847,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.476154+00",
+    "output_sha256": "8be5bd5fb3bc7eaa0316d16a24dce30ab6bbbddb33b72ecb04713183f43b91d8",
+    "queue_wait": 0.427422,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "d5282564-df26-41eb-b02e-d10590528e0b",
+    "latency": 0.915981,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.472155+00",
+    "output_sha256": "52ff1fecdfb4c7b092bd8dc46106f3e377a42cb1ba678b6b6194eb509a60b16a",
+    "queue_wait": 0.415394,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "ca1a9992-03fa-4dc4-b5c3-09f70c4df13f",
+    "latency": 1.084389,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.51858+00",
+    "output_sha256": "6583a7e73ebe5b384435026979a965fd3cc22efdcde7f9eb3e832dad9fee03b8",
+    "queue_wait": 0.603986,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "e821713c-4e53-4dde-86b6-49b425da11cf",
+    "latency": 1.124918,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.478684+00",
+    "output_sha256": "6aed0d7583ed75e705ed5f164ba6faf08679c28460ecc981fdc66a284714ed38",
+    "queue_wait": 0.633929,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "90203e1b-eac9-4b39-abd5-d92b8b21adf5",
+    "latency": 1.294959,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.523841+00",
+    "output_sha256": "8cdd80fb5aa5afdc28c18dce98e8b47ed946aa8bf7648da2e01685a2bb2ffd9d",
+    "queue_wait": 0.849702,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "cee5f8f9-3b36-4187-9545-9ffc073eef7e",
+    "latency": 1.296722,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.526271+00",
+    "output_sha256": "2ca4d14c7c770d71d41c92d1d12a058ab308f350e7463e474caf595d1e98e4bc",
+    "queue_wait": 0.868442,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "826a2aa0-fcf7-473c-85e5-a476ba73ab6a",
+    "latency": 1.269907,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.554935+00",
+    "output_sha256": "77c54ef27cdd90c231a3460bd6854104a5cc59083f2f545e571826bbe1be6117",
+    "queue_wait": 0.814996,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "4a616383-53d5-43b3-a775-d9f0ce8660bf",
+    "latency": 1.468624,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.559863+00",
+    "output_sha256": "3408925817bda7fe9da4c37ea108aee2984ebcc4b7968ff9d03a1d18ea21b959",
+    "queue_wait": 1.02373,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "71c45307-fbe2-4b34-abb7-7ff1617f4b3a",
+    "latency": 1.453405,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.576767+00",
+    "output_sha256": "24543231fd3e204b4c3753f37fe719854eb60cae269bc8f93bae1a474cef3d6a",
+    "queue_wait": 1.051866,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "3ca942ed-ad2d-48fa-9f69-3fa705e002c5",
+    "latency": 1.988757,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.67965+00",
+    "output_sha256": "816fdc8b69ade321e2fd62ffce1799382fc6d286a5322631091992b38b7b1c67",
+    "queue_wait": 1.662516,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "25ecdc39-648f-4c2b-8c36-f2f0d2ea6814",
+    "latency": 1.648633,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.596354+00",
+    "output_sha256": "efd62c9e1d168d954a30f476e2b741f9bf625b4a3b60aa3dbd04390cbda30c64",
+    "queue_wait": 1.239232,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "cbfbcf15-8186-4c88-9e1d-9d6973743d3a",
+    "latency": 1.630802,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.610971+00",
+    "output_sha256": "af9ab2222ec04e7417675341de57dc95da09e209d30fd045c89a29d129e19c23",
+    "queue_wait": 1.252395,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "990054c2-9ed5-4464-adaf-a21c200b606f",
+    "latency": 1.846594,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.610613+00",
+    "output_sha256": "84de9574869d3b4b9e2c04078dcbdea14ca91280bddd8c6627d7678d277c925f",
+    "queue_wait": 1.449779,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "0a13bd9e-6c44-4afe-9b2a-6655c32f13f6",
+    "latency": 1.833898,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.626478+00",
+    "output_sha256": "ce6c79962c699260898f31cbe67170f30bdd344b4a4a54bcfef2d3ffa565e8ff",
+    "queue_wait": 1.459054,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "2de3c088-5124-4b14-b963-30cb88f185b6",
+    "latency": 0.91641,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.471295+00",
+    "output_sha256": "2bcf778bd84217108978c16ad37e472f19b022032cd12271d0e18f9035959d00",
+    "queue_wait": 0.44562,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "885f2f07-a0bb-496e-af89-1476e14ae7a4",
+    "latency": 1.289717,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.528464+00",
+    "output_sha256": "e644a52dba1a1325988932b6fb2771244bfc772cbc85e324cf7b3367250889f1",
+    "queue_wait": 0.89433,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "28dc37c3-a01b-4cfa-9332-2afc66430ada",
+    "latency": 1.462408,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.56605+00",
+    "output_sha256": "e805fc5d202b5ac61a7807b634b1f97f8a6fada7eb3f0978bb46f4bea5b9bd46",
+    "queue_wait": 1.076053,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "1adacc12-d3cd-4ff5-80f4-904e6262641b",
+    "latency": 1.645362,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.599975+00",
+    "output_sha256": "ba0ba355f18df810232bd7c6cb297095de814f8919929197e9101d967d3b970e",
+    "queue_wait": 1.297372,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "5beecf97-9a1f-40d7-9281-c15827161ac3",
+    "latency": 1.822215,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.636005+00",
+    "output_sha256": "8e5f4db87697e049601fa6f46588b1efb8075615fcfdaca6a3bfd61919669aae",
+    "queue_wait": 1.511666,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "7ae7744d-8173-4e97-9c61-6f814ce8b049",
+    "latency": 1.987532,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.681444+00",
+    "output_sha256": "91dfdac580a31e1a9cbbb9a2ac7fc11bffe033c27023816b9884d0e5898d321c",
+    "queue_wait": 1.719661,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "5da958c1-9233-4476-9a59-5965b83afc34",
+    "latency": 1.983219,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.678346+00",
+    "output_sha256": "ecfcd0045dce0a36a9944fd504bd7c2f2502db6ce4a1fd81603dafdfed4da9a7",
+    "queue_wait": 1.724771,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "0ececd40-3eca-42a3-a264-1624516f6ad8",
+    "latency": 1.986519,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.678554+00",
+    "output_sha256": "e784dac5a52fee87e83a9e2a683d27711ee54a87df4e8433a2d94170e7d1caf1",
+    "queue_wait": 1.72115,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "5d4ac97a-50bc-40ef-ba30-1a3537db319b",
+    "latency": 2.182948,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.687592+00",
+    "output_sha256": "88d8ba114c9bc52e7eab6fb1aa2aa1527503bd328fe4a8cd4aa4fdab0f35f71e",
+    "queue_wait": 1.867082,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "2c2338d1-b03c-49d0-834b-6eb37e660473",
+    "latency": 2.191373,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.687854+00",
+    "output_sha256": "c51085ee71bb46aba6bc279637536f1592d73e811d0a78945377c7582c13c630",
+    "queue_wait": 1.874199,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "3257662f-4287-486f-b356-8e276dfdad29",
+    "latency": 1.649995,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.592064+00",
+    "output_sha256": "8646f6b75394f5f769afd79da1b37cacde48aa09889a04868905a017f445584d",
+    "queue_wait": 1.289438,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "7624d36f-670e-41d2-a930-cb84778e9fc5",
+    "latency": 0.915011,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.472669+00",
+    "output_sha256": "2cd6bef11397c554ace4ea094a5ebdbb0da0a7c107647ddb287b128b3558d579",
+    "queue_wait": 0.415048,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "5de2dad9-1645-4b7f-9d4a-10edf4ea214b",
+    "latency": 1.834892,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.623272+00",
+    "output_sha256": "07715f878a6715e0f2a980e429f978007e858c4de94541e23fc8b69c3ad990a3",
+    "queue_wait": 1.511937,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "3c9a9635-7f7b-4bc2-ad89-d82b654f0b9e",
+    "latency": 1.124565,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.478599+00",
+    "output_sha256": "25e410bff3c8f11a258b703a482a35f1f184c6fa5b30da0e5b408814ed340cd8",
+    "queue_wait": 0.59293,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "e47e3ea0-2985-4286-91f9-36720256d4f7",
+    "latency": 1.082578,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.521043+00",
+    "output_sha256": "5f44040c0160ceeec575f06ea0bc219f67c25101381061462bf7d190018d3327",
+    "queue_wait": 0.651839,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "43488d30-218b-4bad-9bab-4053a1dd90ef",
+    "latency": 1.461598,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.568782+00",
+    "output_sha256": "449ecd20460246b5051bb3c8d7310b94efd7607ccabc8c00ccc4912e9f7c408e",
+    "queue_wait": 1.051398,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "48a24795-785b-430a-95a6-bde658d6e7dd",
+    "latency": 2.181072,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.687509+00",
+    "output_sha256": "4f09d97e8253d553f84f9d651c12e6d2a71a142eb256f9a355869b5c7a1727db",
+    "queue_wait": 1.867049,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "3560ea9e-43c5-471f-ad27-65a20317a5f0",
+    "latency": 2.190945,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:01.687672+00",
+    "output_sha256": "5230eb91da2b2ba4fb62d65af6a267317268decd7140e7a45c6a1a43e1a1b17d",
+    "queue_wait": 1.926734,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "50f27f65-8d5a-4313-8b9e-ef763cfb2ff2",
+    "latency": 0.02655,
+    "model_call_attempted": false,
+    "output_expires_at": "2026-11-02 07:59:01.471295+00",
+    "output_sha256": "2bcf778bd84217108978c16ad37e472f19b022032cd12271d0e18f9035959d00",
+    "queue_wait": 0.003016,
+    "state": "SUCCEEDED"
+  },
+  {
+    "attempt_count": 1,
+    "id": "2a817491-44bb-4bf3-9a2b-3eedf17c09c6",
+    "latency": 0.197522,
+    "model_call_attempted": true,
+    "output_expires_at": "2026-11-02 07:59:03.990649+00",
+    "output_sha256": "248b83286a3b9fc34115fc32115125c135cdc3afcf27fca1324dfc54315a6eae",
+    "queue_wait": 0.001716,
+    "state": "SUCCEEDED"
+  }
+]

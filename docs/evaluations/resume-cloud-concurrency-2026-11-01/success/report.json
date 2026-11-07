@@ -1,0 +1,299 @@
+{
+  "api_processes": [
+    {
+      "pid": 87804,
+      "url": "http://127.0.0.1:65451"
+    },
+    {
+      "pid": 87805,
+      "url": "http://127.0.0.1:65452"
+    }
+  ],
+  "assertions": {
+    "actual_calls_match_attempt_flags": true,
+    "actual_model_calls_positive": true,
+    "aggregate_model_peak_bounded": true,
+    "all_accepted_tasks_queued": true,
+    "all_workers_called_model": true,
+    "audit_detects_rolled_back_duplicate_probe": true,
+    "batch_errors_no_retry": true,
+    "both_apis_still_ready": true,
+    "cache_hit_zero_model_calls": true,
+    "cache_preserves_output_and_expiry": true,
+    "concurrent_replays_one_task_per_key": true,
+    "cross_client_cache_miss": true,
+    "different_payload_conflicts": true,
+    "each_key_one_task": true,
+    "evidence_contains_no_private_content": true,
+    "metrics_match_independent_audit": true,
+    "no_fake_contract_errors": true,
+    "one_attempt_per_task": true,
+    "only_expected_http_statuses": true,
+    "per_worker_model_peak_bounded": true,
+    "rate_denials_not_persisted": true,
+    "rate_limit_and_retry_after": true,
+    "requested_failure_scenario_observed": true,
+    "shared_api_bucket": true,
+    "terminal_transition_exactly_once": true,
+    "workers_exit_cleanly": true
+  },
+  "cache": {
+    "other_client_call_delta": 1,
+    "same_client_call_delta": 0
+  },
+  "config": {
+    "capacity": 8,
+    "clients": 4,
+    "delay": 0.15,
+    "error_rate": 0,
+    "refill": 0.1,
+    "seed": 7,
+    "tasks": 24,
+    "threads": 2,
+    "workers": 2
+  },
+  "elapsed_seconds": 3.9931280417367816,
+  "finished_at": "2026-11-01T07:59:04.763494+00:00",
+  "metrics": {
+    "cache_hits": 1,
+    "cache_lookups": 34,
+    "model_samples": 33,
+    "queue_samples": 34
+  },
+  "model": {
+    "aggregate_limit": 4,
+    "aggregate_peak": 4,
+    "batch_calls": 32,
+    "batch_errors": 0,
+    "calls": 33,
+    "duration_seconds": {
+      "count": 33,
+      "max": 0.157780083,
+      "p50": 0.154370333,
+      "p95": 0.156511225
+    },
+    "per_worker_peak": {
+      "87806": 2,
+      "87807": 2
+    }
+  },
+  "requests": {
+    "burst_duration_seconds": 0.057658332865685225,
+    "create_latency_seconds": {
+      "count": 91,
+      "max": 0.062269624788314104,
+      "p50": 0.04369758302345872,
+      "p95": 0.05403143749572337
+    },
+    "create_requests": 91,
+    "replays": 48,
+    "statuses": {
+      "201": 82,
+      "409": 1,
+      "429": 8
+    }
+  },
+  "source": {
+    "dirty": false,
+    "hashes": {
+      "migrations/resume_cloud/0001_init.sql": "67216fe8864b1e10c32264df81a0966f317279c29e1f6d034affd6d7b656cdec",
+      "migrations/resume_cloud/0002_rate_limits.sql": "34f4b9bda7175e5d67dbbab8cd9a3b0b70c846091938cfb330f1c5c922a2f4fd",
+      "migrations/resume_cloud/0003_result_cache.sql": "ba253d0b8bba362b3700d6e26f720671213f16a069143bfc00e116c9f80a7e5b",
+      "migrations/resume_cloud/0004_traceparent.sql": "40da1e8657541376e41adbe749ccd9bd6b1370f8ab98e4327a1ea46c44107a55",
+      "migrations/resume_cloud/0005_metrics_queue_timing.sql": "821e74c3006a2a27b90f12dd3d798148136d63791e8f9adbad94ba1212633abd",
+      "scripts/evaluate_resume_concurrency.py": "7f1b7487ff26e00da1f1e44386d6eded9ce87e1fa7be1d3583160ac5ef119076",
+      "src/soloscale/model_gateway.py": "e178533459db48ef7ea258bca3200aa26aee7cb18454f6425a9584652e504421",
+      "src/soloscale/resume_api.py": "6da4a7b736e0b50ed30e10ac2356dc080ac7909d894fb588b8ff0b774ca0698b",
+      "src/soloscale/resume_claim_truth.py": "32d31890b9cdd0c1027c187db3b46f0c47a0a4c73bfaec3360e68cdcfc8569b5",
+      "src/soloscale/resume_cloud_api.py": "0b26b4e5dbd3d4bdefa4007d9cd3ca40d97e371abba2d7ac0fbd90836763638f",
+      "src/soloscale/resume_cloud_cache.py": "d56a5c842f6212f54f454d3a5d4a3bd80afb6df294f9551ac384838a29144bc3",
+      "src/soloscale/resume_cloud_metrics.py": "5e3270ad29e8d2b2cde168b30a4604083a44ccdbca99f091ad557dc1764497c7",
+      "src/soloscale/resume_cloud_models.py": "faa11dd8243c1638f038e8d22c973f5b679bdcd63f680fec0b4895e123ceebe2",
+      "src/soloscale/resume_cloud_observability.py": "5582e4cfd2c25725d196576645af4fc78bc4234e7edd3c0e97e8622eb63f72a9",
+      "src/soloscale/resume_cloud_repository.py": "af1da0d81625c97b1a95da75f6a51619b64af3dabff42f4ef91945b28f4192e8",
+      "src/soloscale/resume_cloud_service.py": "024a7839f54086fd4d643983a34159bc0ae73f70ed28f9a6146520aa44fedc95",
+      "src/soloscale/resume_cloud_worker.py": "f0efa150163fd89a7350b6251874aaca0ac56891646a909e251ef93cd2310f60",
+      "src/soloscale/resume_docx.py": "e677afb4cb5054aa8bba6be6425a41669171466017d7a01de026683f41cab1dd",
+      "src/soloscale/resume_evidence_pack.py": "9fd118c085f909abd42727b3cb7ef706bd10556b899a21f4703f8a26211baa9d",
+      "src/soloscale/resume_gateway_boundary.py": "c7823597824164432cdebf7ef48287a3a4ff777aef2e6646d68ceff3d9038d33",
+      "src/soloscale/resume_generation.py": "86f740d112b82bb421d4a8a1c82e69edc576d74c53086b36f4fa75f8ad706ad2",
+      "src/soloscale/resume_models.py": "153a2314511ce26a31f83718ff0bdba44535c528693f925c79ab787db77ffb88",
+      "src/soloscale/resume_retrieval.py": "4f5d3ab59b1f19c5d7339c10213f22ced8c5169566c11c96c77072da30d18217",
+      "src/soloscale/resume_template_intake.py": "a2f72f2f4a26392f01f50675e9533ca56ca3b24ec5bf00c85eacee7d837e50a9",
+      "src/soloscale/resume_workspace.py": "8ad3221d7a577041aef8a40c07abb01531fcee292c2dc1c14fb3599341a948c1"
+    },
+    "head": "651112bad4b73828fc8b6cd1d38bf115085fdc21",
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "python": "3.12.13"
+  },
+  "started_at": "2026-11-01T07:59:00.769800+00:00",
+  "status": "PASSED",
+  "tasks": {
+    "duplicate_terminal_events": 0,
+    "end_to_end_seconds": {
+      "count": 34,
+      "max": 2.191373,
+      "p50": 1.465516,
+      "p95": 2.18574695
+    },
+    "queue_wait_seconds": {
+      "count": 34,
+      "max": 1.926734,
+      "p50": 1.0639595,
+      "p95": 1.86957295
+    },
+    "states": {
+      "SUCCEEDED": 34
+    },
+    "terminal_audit_events": 34,
+    "total": 34
+  },
+  "worker_snapshots": [
+    {
+      "metrics": {
+        "cache_hit_rate": 0.05555555555555555,
+        "counters": {
+          "cache_hits": 1,
+          "cache_lookups": 18,
+          "idempotency_conflicts": 0,
+          "manual_review_transitions": 0,
+          "task_create_rate_limited": 0,
+          "tasks_created": 0,
+          "tasks_replayed": 0
+        },
+        "gauges": {
+          "model_active": 0,
+          "model_peak": 2
+        },
+        "histograms": {
+          "model_duration_seconds.error": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 0,
+              "0.05": 0,
+              "0.1": 0,
+              "0.5": 0,
+              "1.0": 0,
+              "120.0": 0,
+              "30.0": 0,
+              "5.0": 0
+            },
+            "count": 0,
+            "max": null,
+            "min": null,
+            "sum": 0.0
+          },
+          "model_duration_seconds.success": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 0,
+              "0.05": 0,
+              "0.1": 0,
+              "0.5": 17,
+              "1.0": 17,
+              "120.0": 17,
+              "30.0": 17,
+              "5.0": 17
+            },
+            "count": 17,
+            "max": 0.1578990831039846,
+            "min": 0.15082550002261996,
+            "sum": 2.6307574175298214
+          },
+          "queue_wait_seconds": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 2,
+              "0.05": 2,
+              "0.1": 2,
+              "0.5": 4,
+              "1.0": 8,
+              "120.0": 18,
+              "30.0": 18,
+              "5.0": 18
+            },
+            "count": 18,
+            "max": 1.926734,
+            "min": 0.001716,
+            "sum": 18.545083999999996
+          }
+        }
+      },
+      "pid": 87806,
+      "processed": 18
+    },
+    {
+      "metrics": {
+        "cache_hit_rate": 0.0,
+        "counters": {
+          "cache_hits": 0,
+          "cache_lookups": 16,
+          "idempotency_conflicts": 0,
+          "manual_review_transitions": 0,
+          "task_create_rate_limited": 0,
+          "tasks_created": 0,
+          "tasks_replayed": 0
+        },
+        "gauges": {
+          "model_active": 0,
+          "model_peak": 2
+        },
+        "histograms": {
+          "model_duration_seconds.error": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 0,
+              "0.05": 0,
+              "0.1": 0,
+              "0.5": 0,
+              "1.0": 0,
+              "120.0": 0,
+              "30.0": 0,
+              "5.0": 0
+            },
+            "count": 0,
+            "max": null,
+            "min": null,
+            "sum": 0.0
+          },
+          "model_duration_seconds.success": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 0,
+              "0.05": 0,
+              "0.1": 0,
+              "0.5": 16,
+              "1.0": 16,
+              "120.0": 16,
+              "30.0": 16,
+              "5.0": 16
+            },
+            "count": 16,
+            "max": 0.15796208288520575,
+            "min": 0.15079733403399587,
+            "sum": 2.470064873341471
+          },
+          "queue_wait_seconds": {
+            "buckets": {
+              "0.001": 0,
+              "0.01": 0,
+              "0.05": 0,
+              "0.1": 0,
+              "0.5": 2,
+              "1.0": 6,
+              "120.0": 16,
+              "30.0": 16,
+              "5.0": 16
+            },
+            "count": 16,
+            "max": 1.867082,
+            "min": 0.427422,
+            "sum": 18.650368
+          }
+        }
+      },
+      "pid": 87807,
+      "processed": 16
+    }
+  ]
+}

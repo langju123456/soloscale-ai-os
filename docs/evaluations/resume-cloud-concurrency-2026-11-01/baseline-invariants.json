@@ -1,0 +1,15 @@
+{
+  "source_head": "787264fa783d19a910052642627e8f7ab2798561",
+  "checks": {
+    "mandatory_idempotency_key": true,
+    "same_key_same_id": true,
+    "conflict_code": true,
+    "wrong_token_fences": true,
+    "expired_lease_fences": true,
+    "interrupted_manual_review": true,
+    "interrupted_inputs_cleared": true,
+    "interrupted_not_requeued": true,
+    "hosted_retries_zero": true
+  },
+  "passed": true
+}

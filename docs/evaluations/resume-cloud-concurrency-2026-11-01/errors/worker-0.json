@@ -1,0 +1,73 @@
+{
+  "metrics": {
+    "cache_hit_rate": 0.0,
+    "counters": {
+      "cache_hits": 0,
+      "cache_lookups": 17,
+      "idempotency_conflicts": 0,
+      "manual_review_transitions": 0,
+      "task_create_rate_limited": 0,
+      "tasks_created": 0,
+      "tasks_replayed": 0
+    },
+    "gauges": {
+      "model_active": 0,
+      "model_peak": 2
+    },
+    "histograms": {
+      "model_duration_seconds.error": {
+        "buckets": {
+          "0.001": 0,
+          "0.01": 0,
+          "0.05": 0,
+          "0.1": 0,
+          "0.5": 6,
+          "1.0": 6,
+          "120.0": 6,
+          "30.0": 6,
+          "5.0": 6
+        },
+        "count": 6,
+        "max": 0.1577494996599853,
+        "min": 0.15053820796310902,
+        "sum": 0.924924832303077
+      },
+      "model_duration_seconds.success": {
+        "buckets": {
+          "0.001": 0,
+          "0.01": 0,
+          "0.05": 0,
+          "0.1": 0,
+          "0.5": 11,
+          "1.0": 11,
+          "120.0": 11,
+          "30.0": 11,
+          "5.0": 11
+        },
+        "count": 11,
+        "max": 0.15985733270645142,
+        "min": 0.1517952079884708,
+        "sum": 1.693582666106522
+      },
+      "queue_wait_seconds": {
+        "buckets": {
+          "0.001": 1,
+          "0.01": 1,
+          "0.05": 1,
+          "0.1": 1,
+          "0.5": 3,
+          "1.0": 7,
+          "120.0": 17,
+          "30.0": 17,
+          "5.0": 17
+        },
+        "count": 17,
+        "max": 1.910175,
+        "min": 0.000809,
+        "sum": 18.388561000000003
+      }
+    }
+  },
+  "pid": 88209,
+  "processed": 17
+}

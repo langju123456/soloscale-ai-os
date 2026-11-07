@@ -1,0 +1,5 @@
+# Opt-in host access for the synthetic evaluator. Start only the postgres service.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${RESUME_CLOUD_EVAL_PORT:-55439}:5432"
