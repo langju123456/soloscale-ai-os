@@ -37,6 +37,16 @@ evidence remains unknown.
 | External integrations | YouTube OAuth/upload, read-only GitHub metadata, LinkedIn/X handoffs, and a paid-operation-gated HeyGen provider |
 | Quality tooling | pytest, Ruff, strict mypy configuration, deterministic checks, and package/build tooling |
 
+## Measured results
+
+| What was measured | Result | Source |
+| --- | --- | --- |
+| Resume cloud service under concurrent load (local machine, 2 API processes, 2 workers with 2 model slots each, fake model gateway, PostgreSQL 16) | 91 `POST /tasks` requests; 48 idempotent replays returned the original task; 8 over-limit requests got `429`; 0 duplicate terminal events; total model concurrency peaked at 4 of the configured bound of 4 | [Concurrency evaluation, 2026-11-01](docs/evaluations/resume-cloud-concurrency-2026-11-01.md) |
+| 0.4.2 release gate | 720 passed / 10 skipped, Ruff, strict mypy, wheel and sdist build | [TASK.md](TASK.md), [closeout-0.4.2](docs/engineering/closeout-0.4.2.md) |
+| macOS desktop startup | The app and its bundled Python backend check each other with HMAC-SHA256 over a per-launch secret, bound to the loopback origin, process ID and a nonce; the session cookie is accepted only when the proof matches | [DesktopBootstrap.swift](desktop/macos/Sources/SoloScaleDesktopCore/DesktopBootstrap.swift) |
+
+These are synthetic, local measurements. They do not describe paid upstream or production capacity.
+
 ---
 
 ## Why SoloScale exists
